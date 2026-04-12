@@ -1,0 +1,4 @@
+comment = 'Job scheduler for postgres'
+default_version = '0.1'
+module_pathname = '$libdir/my_nedo_cron'
+relocatable = false
