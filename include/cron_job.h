@@ -1,17 +1,9 @@
-//
-// Created by stasyan on 4/12/26.
-//
-
-#ifndef MY_EXTENTSION_JOB_METADATA_H
-#define MY_EXTENTSION_JOB_METADATA_H
-
-
 #include "postgres.h"
-
 #include "access/htup.h"
 #include "access/tupdesc.h"
 #include "nodes/pg_list.h"
 
+#include "datatype/timestamp.h"
 
 typedef struct CronJob {
     char * jobName;
@@ -21,7 +13,9 @@ typedef struct CronJob {
 } CronJob;
 
 List* LoadCronJobs(void);
-static void StartTransaction(void);
-static void EndTransaction(void) ;
+extern void StartTransaction(void);
+extern void EndTransaction(void) ;
 CronJob * TupleToCronJob(HeapTuple tuple, TupleDesc tupleDescriptor);
-#endif
+extern  List* CreateCronTasks(List* cronJobs);
+
+extern void DoCronTasks(List* tasks);

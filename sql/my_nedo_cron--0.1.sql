@@ -1,21 +1,52 @@
-CREATE SCHEMA my_cron
-    CREATE TABLE jobs (
-        job_name text not null,
-        cron_string not null ,
-        query text not null,
-        connection_string text not null ,
-        PRIMARY KEY (job_name)
-    )
+CREATE SCHEMA nedo_cron
+GRANT USAGEON SCHEMA nedo_cron TO public;
 
-    CREATE TABLE results (
-        id bigint primary key default nextval('task_id_sequence'),
-        job_name text not null ,
-        start_time timestamptz,
-        end_time timestamptz,
-        output text
-    )
+CREATE SEQUENCE nedo_cron.jobid_seq;
+GRANT USAGE ON SEQUENCE nedo_cron.jobid_seq TO public;
 
-    CREATE SEQUENCE task_id_sequence NO CYCLE ;
+CREATE TABLE nedo_cron.jobs (
+    jobid bigint PRIMARY KEY ,
+    schedule text not null,
+    query text not null,
+    host text not null default 'localhost',
+    port int not null default inet_server_port(),
+    database text not null default current_database(),
+    user text not null default current_user();
+);
 
--- CREATE FUNCTION  my_cron.shedule(text, text, text, text)
---     RETURNS text
+CREATE TABLE nedo_cron.results (
+    resultid bigint primary key,
+    jobid text not null ,
+    start_time timestamptz,
+    end_time timestamptz,
+    status int not null,
+    output text
+);
+
+
+CREATE FUNCTION  nedo_cron.schedule_job(schedule text, command text)
+    RETURNS bigint
+    LANGUAGE C STRICT
+    AS 'MODULE_PATHNAME', $$nedo_cron_schedule_job$$;
+    COMMENT ON FUNCTION nedo_cron.schedule_job(text,text)
+        IS 'schedule a job'
+
+
+CREATE FUNCTION  nedo_cron.unschedule_job(bigint)
+    RETURNS bool
+    LANGUAGE C STRICT
+    AS 'MODULE_PATHNAME', $$nedo_cron_unschedule_job$$;
+    COMMENT ON FUNCTION nedo_cron.unschedule_job(text,text)
+        IS 'unschedule a job'
+
+CREATE FUNCTION nedo_cron.refresh_jobs()
+    RETURNS trigger
+    LANGUAGE C
+    AS 'MODULE_PATHNAME', $$nedo_cron_refresh_jobs$$;
+    COMMENT ON FUNCTION nedo_cron.refresh_jobs()
+        IS 'refresh jobs table';
+
+CREATE TRIGGER nedo_cron_refresh_jobs
+    AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE
+    ON nedo_cron.jobs
+    FOR STATEMENT EXECUTE PROCEDURE nedo_cron.refresh_jobs();

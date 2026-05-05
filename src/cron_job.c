@@ -1,8 +1,7 @@
 //
-// Created by stasyan on 4/12/26.
+// Created by stasyan on 5/4/26.
 //
 
-#include "../include/job_metadata.h"
 
 
 #include "postgres.h"
@@ -18,14 +17,17 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
+#include "../include/cron_job.h"
+#include "cron_task.h"
 
 #define NUM_JOB_NAME 1
 #define NUM_CRON_STRING 2
 #define NUM_NUM_QUERY 3
 #define NUM_CONNECTION_STRING 4
 
-static void StartTransaction();
-static void EndTransaction();
+
+void StartTransaction();
+void EndTransaction();
 CronJob * TupleToCronJob(HeapTuple tuple, TupleDesc tupleDescriptor);
 
 List* LoadCronJobs(void) {
@@ -63,7 +65,7 @@ List* LoadCronJobs(void) {
 }
 
 // ?
-static void StartTransaction(void) {
+void StartTransaction(void) {
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
     SPI_connect();
@@ -71,11 +73,12 @@ static void StartTransaction(void) {
 
 }
 
-static void EndTransaction(void) {
+void EndTransaction(void) {
     SPI_finish();
     PopActiveSnapshot();
     CommitTransactionCommand();
 }
+
 
 CronJob * TupleToCronJob(HeapTuple tuple, TupleDesc tupleDescriptor) {
     CronJob *cronJob = NULL;

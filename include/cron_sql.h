@@ -1,0 +1,8 @@
+//
+// Created by stasyan on 5/4/26.
+//
+
+#ifndef MY_EXTENSION_NEDO_CRON_CRON_SQL_H
+#define MY_EXTENSION_NEDO_CRON_CRON_SQL_H
+
+#endif //MY_EXTENSION_NEDO_CRON_CRON_SQL_H
