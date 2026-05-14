@@ -33,12 +33,14 @@ typedef enum CronState
 
 typedef struct CronTask
 {
-    CronJob *job;
+    int64 jobId;
+    int64 runId;
     CronState state;
-    bool readyToPollFlag;
-    PGconn *conn;
-    PostgresPollingStatusType pollingStatus;
-    TimestampTz nextEventTime;
+    int pendingRunCount;
+    PGconn * conn;
+    char * errorMessage;
+    bool isActive;
+    bool isSocketReady;
 } CronTask;
 extern CronTask* CreateCronTask(CronJob *cronJob);
 extern List* CreateCronTasks(List* cronJobs);

@@ -2,14 +2,19 @@
 #include "access/htup.h"
 #include "access/tupdesc.h"
 #include "nodes/pg_list.h"
-
+#include "cron_parser.h"
 #include "datatype/timestamp.h"
 
 typedef struct CronJob {
-    char * jobName;
-    char *cronString;
-    char *query;
-    char *connectionString;
+    int64 jobId;
+    char* scheduleText;
+    CronSchedule schedule;
+    char * command;
+    char * nodeName;
+    int nodePort;
+    char * database;
+    char * userName;
+
 } CronJob;
 
 List* LoadCronJobs(void);

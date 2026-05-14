@@ -25,16 +25,59 @@
 #include "tcop/utility.h"
 #include "signal.h"
 #include <poll.h>
+#include <utils/rel.h>
+
+#include "cron_job.h"
+#include "catalog/indexing.h"
 #include "cron_task.h"
+#include "cron_parser.h"
+#include  "commands/sequence.h"
+#include "postmaster/postmaster.h"
+#include "catalog/namespace.h"
+#include "utils/lsyscache.h"
+#include "server/access/table.h"
+#include "access/heapam.h"
+#include "cron_parser.h"
+#include "utils/syscache.h"
+#include "access/genam.h"
+#include "utils/fmgroids.h"
 
 
+
+
+
+
+
+
+
+
+#define CRON_SCHEMA_NAME "nedo_cron"
+#define JOBS_TABLE_NAME "jobs"
 #define CRON_TASK_TIMEOUT_MS 3000
+#define JOB_ID_SEQUENCE_NAME "nedo_cron.jobid_seq"
+#define JOB_ID_INDEX_NAME "job_pkey"
+#define HOW_MUCH_ATTRS_IN_CRON_JOB 7
 
+#define Natts_cron_job 7
+#define Att_cron_job_jobid 1
+#define Att_cron_job_schedule 2
+#define Att_cron_job_command 3
+#define Att_cron_job_nodename 4
+#define Att_cron_job_nodeport 5
+#define Att_cron_job_database 6
+#define Att_cron_job_username 7
+
+static char * nodename = "localhost";
 
 bool CronJobCacheValid = false;
+static Oid CachedCronJobRealtionId = InvalidOid;
 
+static char *CronTableDatabaseName = "postgres";
 HTAB * CronJobHashTable = NULL;
-HTAB * CronStateHashTable = NULL;
+HTAB * CronTaskHashTable = NULL;
+
+static MemoryContext CronJobContext = NULL;
+static MemoryContext CronTaskContext = NULL;
 
 
 PG_MODULE_MAGIC;
@@ -49,7 +92,7 @@ static void sighupHandler(SIGNAL_ARGS);
 
 
 static void LogTaskResult(char * jobName, int code);
-
+static void InvalidateJobCache(void);
 
 
 
@@ -128,35 +171,199 @@ static void PgOctopusWorkerMain(Datum arg) {
     MemoryContextSwitchTo(loop_memory_context);
 
     elog(LOG, "my_nedo_cron started ...");
-    // while (!sigtermFlag) {
-    //     List* cronStates = NIL;
-    //
-    //     AcceptInvalidationMessages();
-    //
-    //     if (!CronJobCacheValid) {
-    //         ReloadCronJobs();
-    //     }
-    //
-    //     cronStates = LoadCronStates();
-    //     TimestampTz currentTime = loadCurrentTime();
-    //
-    //     StartPendingJobs(cronStates, currentTime);
-    //
-    //
-    //     WaitForEvent(cronStates);
-    //     ManageCronStates(cronStates, currentTime);
-    //
-    //     MemoryContextReset(loop_memory_context);
-    //
-    //
-    // }
-    // elog(LOG, "my_nedo_cron exiting ...");
-    //
-    // proc_exit(0);
+    while (!sigtermFlag) {
+        List* cronStates = NIL;
+
+        AcceptInvalidationMessages();
+
+        if (!CronJobCacheValid) {
+            ReloadCronJobs();
+            elog(LOG, "jobs reloaded");
+        }
+
+        // cronStates = LoadCronStates();
+        // TimestampTz currentTime = loadCurrentTime();
+        //
+        // StartPendingJobs(cronStates, currentTime);
+        //
+        //
+        // WaitForEvent(cronStates);
+        // ManageCronStates(cronStates, currentTime);
+        //
+        // MemoryContextReset(loop_memory_context);
+
+
+    }
+    elog(LOG, "my_nedo_cron exiting ...");
+
+    proc_exit(0);
 }
 
+/*
+ *    Эта функция только вставляет в postgres таблицу (не в структуру, именно в таблицу)
+ *    ОДНУ строку job'а, потом отправляет сообщение воркеру, что нужно обновить
+ *    хэш таблицы (refresh_jobs)
+ */
+Datum schedule_job(PG_FUNCTION_ARGS) {
+    text *scheduleText = PG_GETARG_TEXT_P(0);
+    text *queryText = PG_GETARG_TEXT_P(0);
+
+    char* schedule = text_to_cstring(scheduleText);
+    char* query = text_to_cstring(queryText);
+    CronSchedule *parsedSchedule = NULL;
+    Oid userId = GetUserId();
+    char* username = GetUserNameFromId(userId, false);
+    parsedSchedule = parse(schedule);
+
+    Oid cronSchemaId = InvalidOid;
+    Oid cronJobsRelationId = InvalidOid;
+
+    Datum jobIdSeqName = 0;
+    Datum jobIdDatum = 0;
+    int64 jobId = 0;
+    if (parsedSchedule == NULL) {
+        free(parsedSchedule);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE)), errmsg("invalid schedule: %s", schedule));
+    }
+
+    free(parsedSchedule);
+
+    jobIdSeqName = CStringGetDatum(JOB_ID_SEQUENCE_NAME);
+    jobIdDatum = DirectFunctionCall1(nextval, jobIdSeqName);
+    jobId = DatumGetInt64(jobIdDatum);
+
+    // создаем и заполняем массив values, который потом превратим в строку таблицы и insert'нем её
+    Datum values[Natts_cron_job];
+    bool isNulls[Natts_cron_job];
+
+    memset(values, 0, sizeof(values));
+    memset(isNulls, false, sizeof(isNulls));
+
+    values[Att_cron_job_jobid - 1] = jobIdDatum;
+    values[Att_cron_job_schedule - 1] = CStringGetTextDatum(schedule);
+    values[Att_cron_job_command - 1] = CStringGetTextDatum(query);
+    values[Att_cron_job_nodename - 1] = CStringGetTextDatum(nodename);
+    values[Att_cron_job_nodeport - 1] = Int32GetDatum(PostPortNumber);
+    values[Att_cron_job_database - 1] = CStringGetTextDatum(CronTableDatabaseName);
+    values[Att_cron_job_username - 1] = CStringGetTextDatum(username);
+
+    cronSchemaId = get_namespace_oid(CRON_SCHEMA_NAME, false);
+    cronJobsRelationId = get_relname_relid(JOBS_TABLE_NAME, cronSchemaId);
+
+    Relation cronJobsTable = table_open(cronJobsRelationId, RowExclusiveLock);
+
+    TupleDesc tupleDescriptor = RelationGetDescr(cronJobsTable);
+    HeapTuple heap_tuple = heap_form_tuple(tupleDescriptor, values, isNulls); // строка таблицы
+
+    CatalogTupleInsert(cronJobsTable, heap_tuple);
+    CommandCounterIncrement();
+
+    table_close(cronJobsTable, RowExclusiveLock);
+
+    InvalidateJobCache();
+
+    PG_RETURN_INT64(jobId);
+}
+
+Datum unschedule_job(PG_FUNCTION_ARGS) {
+
+    int64 jobId = PG_GETARG_INT64(0);
+
+    Oid cronSchemaId = InvalidOid;
+    Oid cronJobRelationId = InvalidOid;
+    Oid cronJobIndexId = InvalidOid;
+
+    Relation cronJobsTable = NULL;
+    SysScanDesc scan_desc = NULL;
+    ScanKeyData scankey[1];
+    int scanKeyCounter = 1;
+    bool indexOK = true;
+    HeapTuple heap_tuple = NULL;
 
 
+    cronSchemaId = get_namespace_oid(CRON_SCHEMA_NAME, false);
+    cronJobRelationId = get_relname_relid(JOBS_TABLE_NAME, cronSchemaId);
+    cronJobIndexId  = get_relname_relid(JOB_ID_INDEX_NAME, cronSchemaId);
+
+    cronJobsTable = table_open(cronJobRelationId, RowExclusiveLock);
+
+    ScanKeyInit(&scankey[0], Att_cron_job_jobid, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(jobId));
+
+    scan_desc = systable_beginscan(cronJobsTable, cronJobIndexId, indexOK, NULL, scanKeyCounter, scankey);
+
+    heap_tuple = systable_getnext(scan_desc);
+    if (!HeapTupleIsValid(heap_tuple)) {
+        ereport(ERROR, (errmsg("Cannot find current job " UINT64_FORMAT, jobId)));
+    }
+
+    simple_heap_delete(cronJobsTable, &heap_tuple->t_self);
+    CommandCounterIncrement();
+
+    systable_endscan(scan_desc);
+    table_close(cronJobsTable, RowExclusiveLock);
+
+    InvalidateJobCache();
+
+    PG_RETURN_BOOL(true);
+}
+
+Oid CronJobRelationId(void) {
+    if (CachedCronJobRealtionId == InvalidOid) {
+        Oid schema_id = get_namespace_oid(CRON_SCHEMA_NAME, false);
+        CachedCronJobRealtionId = get_relname_relid(JOBS_TABLE_NAME, schema_id);
+    }
+
+    return CachedCronJobRealtionId;
+}
+
+static void InvalidateJobCache(void) {
+    HeapTuple tuple = NULL;
+
+    tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(CronJobRelationId()));
+    if (HeapTupleIsValid(tuple)) {
+        CacheInvalidateRelcacheByTuple(tuple);
+        ReleaseSysCache(tuple);
+    }
+}
+
+List * LoadJobsList() {
+    List * jobs = NULL;
+
+}
+
+HTAB * CreateCronJobHashTable() {
+
+}
+
+static void ReloadCronJobs(void) {
+    List * jobsList = NULL;
+    ListCell * jobCell = NULL;
+    CronTask * task = NULL;
+    HASH_SEQ_STATUS status;
+
+
+    MemoryContextResetChildren(CronJobContext);
+    CronJobHashTable = CreateCronJobHashTable(); // -------
+
+    hash_seq_init(&status, CronTaskHashTable);
+
+    while ((task = (CronTask *)hash_seq_search(&status)) != NULL) {
+        task->isActive = false;
+    }
+
+    jobsList = LoadJobsList(); // -----------
+
+    foreach(jobCell, jobsList) {
+        CronJob * job = (CronJob *) lfirst(jobCell);
+
+        CronTask *task = getCronTask(job->jobId); // -------
+        task->isActive = true;
+    }
+
+    CronJobCacheValid = true;
+
+
+}
 
 
 // пока тут ничего нет, но скоро она начнет писать логи
