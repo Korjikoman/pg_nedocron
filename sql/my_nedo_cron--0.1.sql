@@ -1,5 +1,5 @@
-CREATE SCHEMA nedo_cron
-GRANT USAGEON SCHEMA nedo_cron TO public;
+CREATE SCHEMA nedo_cron;
+GRANT USAGE ON SCHEMA nedo_cron TO public;
 
 CREATE SEQUENCE nedo_cron.jobid_seq;
 GRANT USAGE ON SEQUENCE nedo_cron.jobid_seq TO public;
@@ -11,7 +11,7 @@ CREATE TABLE nedo_cron.jobs (
     host text not null default 'localhost',
     port int not null default inet_server_port(),
     database text not null default current_database(),
-    user text not null default current_user();
+    username text not null default current_user
 );
 
 CREATE TABLE nedo_cron.results (
@@ -27,26 +27,26 @@ CREATE TABLE nedo_cron.results (
 CREATE FUNCTION  nedo_cron.schedule_job(schedule text, command text)
     RETURNS bigint
     LANGUAGE C STRICT
-    AS 'MODULE_PATHNAME', $$nedo_cron_schedule_job$$;
+    AS 'MODULE_PATHNAME', $$schedule_job$$;
     COMMENT ON FUNCTION nedo_cron.schedule_job(text,text)
-        IS 'schedule a job'
+        IS 'schedule a job';
 
 
 CREATE FUNCTION  nedo_cron.unschedule_job(bigint)
     RETURNS bool
     LANGUAGE C STRICT
-    AS 'MODULE_PATHNAME', $$nedo_cron_unschedule_job$$;
-    COMMENT ON FUNCTION nedo_cron.unschedule_job(text,text)
-        IS 'unschedule a job'
+    AS 'MODULE_PATHNAME', $$unschedule_job$$;
+    COMMENT ON FUNCTION nedo_cron.unschedule_job(bigint)
+        IS 'unschedule a job';
 
-CREATE FUNCTION nedo_cron.refresh_jobs()
+CREATE FUNCTION nedo_cron.invalidate_job_cache()
     RETURNS trigger
     LANGUAGE C
-    AS 'MODULE_PATHNAME', $$nedo_cron_refresh_jobs$$;
-    COMMENT ON FUNCTION nedo_cron.refresh_jobs()
-        IS 'refresh jobs table';
+    AS 'MODULE_PATHNAME', $$invalidate_job_cache$$;
+    COMMENT ON FUNCTION nedo_cron.invalidate_job_cache()
+        IS 'invalidate job cache';
 
-CREATE TRIGGER nedo_cron_refresh_jobs
+CREATE TRIGGER cron_job_cache_invalidate
     AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE
     ON nedo_cron.jobs
-    FOR STATEMENT EXECUTE PROCEDURE nedo_cron.refresh_jobs();
+    FOR STATEMENT EXECUTE PROCEDURE nedo_cron.invalidate_job_cache();

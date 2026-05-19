@@ -26,6 +26,10 @@ typedef struct CronSchedule {
     bool month[13];
     bool dayOfWeek[7];
 
+    bool MIN_STAR;
+    bool HOUR_STAR;
+    bool DOW_STAR;
+    bool DOM_STAR;
 } CronSchedule;
 
 
@@ -36,7 +40,7 @@ int parse_cron_field(CronSchedule* scheduler, char * field, FieldType type);
 bool parse_range(char* string, int* start, int* finish);
 CronSchedule* parse(char * command);
 
-
+void free_cron_schedule(CronSchedule * schedule);
 void free_string_array(char** array);
 bool set_field_value(CronSchedule* scheduler, FieldType type, int value);
 int charArrayLength(char ** charArray);

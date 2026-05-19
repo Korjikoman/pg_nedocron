@@ -220,6 +220,25 @@ bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int fi
     return true;
 }
 
+static void mark_star_field(CronSchedule *scheduler, FieldType type) {
+    switch (type) {
+        case CRON_MINUTE:
+            scheduler->MIN_STAR = true;
+            break;
+        case CRON_HOUR:
+            scheduler->HOUR_STAR = true;
+            break;
+        case CRON_DOM:
+            scheduler->DOM_STAR = true;
+            break;
+        case CRON_DOW:
+            scheduler->DOW_STAR = true;
+            break;
+        case CRON_M:
+            break;
+    }
+}
+
 
 bool get_bounds(int *min_value, int* max_value, FieldType type) {
     if (min_value == NULL || max_value == NULL) {
@@ -283,6 +302,7 @@ bool set_field_value(CronSchedule* scheduler, FieldType type, int value) {
                 value = 0;
             }
             scheduler->dayOfWeek[value] = true;
+
             return true;
     }
     return false;
@@ -303,8 +323,11 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
     if (!get_bounds(&min_value, &max_value, type)) return false;
 
     if (isStar(item)) {
-
-        return set_field_range(scheduler, type, min_value, max_value, 1);
+        bool ok = set_field_range(scheduler, type, min_value, max_value, 1);
+        if (ok) {
+            mark_star_field(scheduler, type);
+        }
+        return ok;
 
     }
 
@@ -385,8 +408,6 @@ int parse_cron_field(CronSchedule* scheduler, char *field, FieldType type ) {
 }
 
 CronSchedule* parse(char * command) {
-    CronSchedule* scheduler = {0};
-
     if (command == NULL) return NULL;
     CronSchedule temp = {0};
     char ** fields = str_split(command, SPACE_DELIMITER);
@@ -407,9 +428,19 @@ CronSchedule* parse(char * command) {
         return NULL;
     }
 
+    CronSchedule *scheduler = malloc(sizeof(*scheduler));;
+
+    if (scheduler == NULL) {
+        free_string_array(fields);
+        return NULL;
+    }
     *scheduler = temp;
 
     free_string_array(fields);
     return scheduler;
 
+}
+
+void free_cron_schedule(CronSchedule * schedule) {
+    free(schedule);
 }

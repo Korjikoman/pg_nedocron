@@ -25,3 +25,9 @@ CMakeFiles/
 .DS_Store
 Thumbs.db
 HINTS.txt
+
+.codex/
+.agents/
+last-fixes-explanation.txt
+tests/
+to-do.txt
