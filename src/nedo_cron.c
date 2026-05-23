@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <time.h>
@@ -17,17 +18,18 @@
 #include "signal.h"
 #include <poll.h>
 #include "utils/backend_status.h"
-#include "cron_job.h"
 #include "catalog/indexing.h"
 #include "cron_task.h"
 #include "cron_parser.h"
 #include "cron_time.h"
-#include "utils/hsearch.h"
+#include "utils/palloc.h"
 #include "utils/timestamp.h"
+#include "../include/cron_sql.h"
+#include "utils/hsearch.h"
 #include "mb/pg_wchar.h"
+#include "utils/guc.h"
 
 
-int RunCounter = 0;
 static const int MaxSleep = 1000; // ms
 
 volatile sig_atomic_t sighupFlag = false;
@@ -39,7 +41,7 @@ MemoryContext CronJobContext = NULL;
 MemoryContext CronTaskContext = NULL;
 bool CronJobCacheValid = false;
 const char *tabname = "nedo_cron jobs";
-
+char *NedoCronDatabaseName = "postgres";
 static char *extension_name = "nedo_cron";
 int TaskTimeout = 10000; // 10sec
 
@@ -59,7 +61,6 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
 void StartPendingTasks(List * taskList, TimestampTz currentTime);
 CronJob * getCronJob(int64 jobId);
 void ManageCronTasks(List * tasks, TimestampTz currentTime);
-
 
 void _PG_init() {
     BackgroundWorker worker;
@@ -81,10 +82,32 @@ void _PG_init() {
     snprintf(worker.bgw_name, sizeof(worker.bgw_name), "my_nedo_cron_sheduler");
     snprintf(worker.bgw_type, sizeof(worker.bgw_type), "my_nedo_cron");
 
+    DefineCustomStringVariable("nedo_cron.database_name",
+        "Database containing nedo_cron metadata tables",
+        NULL,
+        &NedoCronDatabaseName,
+        "postgres",
+        PGC_POSTMASTER,
+        0,
+        NULL,
+        NULL,
+        NULL
+    );
+
     RegisterBackgroundWorker(&worker);
 }
 
+static void SetTaskError(CronTask * task, const char* message) {
+    MemoryContext old_context;
 
+    if (message == NULL || message[0] == '\0') {
+        message = "unknown error, message text = '\\0'";
+    }
+
+    old_context = MemoryContextSwitchTo(CronTaskContext);
+    task->errorMessage = pstrdup(message);
+    MemoryContextSwitchTo(old_context);
+}
 static void sigtermHandler(SIGNAL_ARGS) {
     int save_errno = errno;
     sigtermFlag = true;
@@ -112,7 +135,7 @@ void PgOctopusWorkerMain(Datum arg) {
     BackgroundWorkerUnblockSignals(); // разблокируем сигналы для bgw
 
     // connecting to db
-    BackgroundWorkerInitializeConnection("postgres", NULL, BGWORKER_BYPASS_ALLOWCONN | BGWORKER_BYPASS_ALLOWCONN);
+    BackgroundWorkerInitializeConnection(NedoCronDatabaseName, NULL, BGWORKER_BYPASS_ALLOWCONN | BGWORKER_BYPASS_ALLOWCONN);
 
     CronJobContext = AllocSetContextCreate(CurrentMemoryContext,
                                                "CronJob context",
@@ -293,7 +316,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
     if (job == NULL && taskState != CRON_TASK_DONE) {
         task->state = CRON_TASK_ERROR;
-        task->errorMessage = "job metadata not found";
+        SetTaskError(task, "job metadata not found");
         taskState = task->state;
     }
 
@@ -306,7 +329,6 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
             if (task->pendingRunCount == 0) break;
 
-            task->runId = RunCounter++;
             task->pendingRunCount --;
             task->state = CRON_TASK_START;
             break;
@@ -337,28 +359,38 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
             };
 
-            elog(LOG, "my_nedo_cron: starting job %ld: %s", key, job->command);
 
+            elog(LOG, "my_nedo_cron: starting job %ld: %s", key, job->command);
+            task->runId = InsertRunDetailsStart(task,job,GetCurrentTimestamp());
             connection = PQconnectStartParams(keywords, values, false);
+
             if (connection == NULL) {
-                task->errorMessage = "PQconnectStartParams returned NULL";
+                SetTaskError(task, "PQconnectStartParams returned NULL");
                 task->state = CRON_TASK_ERROR;
                 task->polling_status = 0;
                 break;
             }
-            PQsetnonblocking(connection, 1);
+
+            task->conn = connection;
+
+            if (PQsetnonblocking(connection, 1) != 0 ) {
+                SetTaskError(task,PQerrorMessage(connection));
+                task->state = CRON_TASK_ERROR;
+                task->polling_status = 0;
+                break;
+            }
 
             if (PQstatus(connection) == CONNECTION_BAD) {
-                task->errorMessage = PQerrorMessage(connection);
+                SetTaskError(task,PQerrorMessage(connection));
                 task->state = CRON_TASK_ERROR;
                 task->polling_status = 0;
                 break;
             }
             deadline = TimestampTzPlusMilliseconds(currentTime,TaskTimeout);
             task->startDeadline = deadline;
-            task->conn = connection;
             task->polling_status = PGRES_POLLING_WRITING;
             task->state = CRON_TASK_CONNECTING;
+
             break;
         }
 
@@ -371,20 +403,20 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             if (!task->isActive) {
                 task->state= CRON_TASK_ERROR;
                 task->polling_status = 0;
-                task->errorMessage = "job has been removed";
+                SetTaskError(task, "job has been removed") ;
                 break;
             }
 
             if (TimestampDifferenceExceeds(task->startDeadline, currentTime, 0)) {
                 task->state = CRON_TASK_ERROR;
                 task->polling_status = 0;
-                task->errorMessage = "timeout reached";
+                SetTaskError(task, "timeout reached");
                 break;
             }
 
             conn_status  = PQstatus(connection);
             if (conn_status == CONNECTION_BAD) {
-                task->errorMessage = PQerrorMessage(connection);
+                SetTaskError(task, PQerrorMessage(connection));
                 task->polling_status = 0;
                 task->state = CRON_TASK_ERROR;
                 break;
@@ -396,13 +428,15 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
             pollingStatus = PQconnectPoll(connection);
             if (pollingStatus == PGRES_POLLING_OK) {
+                int pid = PQbackendPID(connection);
+                UpdatePID(task->runId, pid);
                 task->polling_status = PGRES_POLLING_WRITING;
                 task->state = CRON_TASK_SENDING;
             }
             else if (pollingStatus == PGRES_POLLING_FAILED) {
                 task->polling_status = 0;
                 task->state = CRON_TASK_ERROR;
-                task->errorMessage = PQerrorMessage(connection);
+                SetTaskError(task, PQerrorMessage(connection));
 
             }
             else {
@@ -421,20 +455,20 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             if (!task->isActive) {
                 task->state= CRON_TASK_ERROR;
                 task->polling_status = 0;
-                task->errorMessage = "job has been removed";
+                SetTaskError(task,"job has been removed");
                 break;
             }
 
             if (TimestampDifferenceExceeds(task->startDeadline, currentTime, 0)) {
                 task->state = CRON_TASK_ERROR;
                 task->polling_status = 0;
-                task->errorMessage = "timeout reached";
+                SetTaskError(task,"timeout reached");
                 break;
             }
 
             conn_status  = PQstatus(connection);
             if (conn_status == CONNECTION_BAD) {
-                task->errorMessage = PQerrorMessage(connection);
+                SetTaskError(task,PQerrorMessage(connection));
                 task->polling_status = 0;
                 task->state = CRON_TASK_ERROR;
                 break;
@@ -452,7 +486,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 task->startDeadline = 0;
             }
             else {
-                task->errorMessage = pstrdup(PQerrorMessage(connection));
+                SetTaskError(task,PQerrorMessage(connection));
                 task->polling_status = 0;
                 task->state = CRON_TASK_ERROR;
             }
@@ -465,12 +499,12 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             if (!task->isActive) {
                 task->state= CRON_TASK_ERROR;
                 task->polling_status = 0;
-                task->errorMessage = "job has been removed";
+                SetTaskError(task,"job has been removed");
                 break;
             }
             conn_status  = PQstatus(connection);
             if (conn_status == CONNECTION_BAD) {
-                task->errorMessage = PQerrorMessage(connection);
+                SetTaskError(task,PQerrorMessage(connection));
                 task->polling_status = 0;
                 task->state = CRON_TASK_ERROR;
                 break;
@@ -479,7 +513,15 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 break;
             }
 
-            PQconsumeInput(connection);
+
+
+            if (PQconsumeInput(connection) != 1) {
+                SetTaskError(task,PQerrorMessage(connection));
+                task->polling_status = 0;
+                task->state = CRON_TASK_ERROR;
+                break;
+            }
+
             connectionBusy = PQisBusy(connection);
             if (connectionBusy == 1) {
                 break;
@@ -497,7 +539,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                     case PGRES_BAD_RESPONSE:
                     case PGRES_FATAL_ERROR:
                     case PGRES_NONFATAL_ERROR: {
-                        task->errorMessage = pstrdup(PQresultErrorMessage(result));
+                        SetTaskError(task,PQresultErrorMessage(result));
                         task->polling_status = 0;
                         task->state = CRON_TASK_ERROR;
                         break;
@@ -505,7 +547,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                     case PGRES_COPY_BOTH:
                     case PGRES_COPY_IN:
                     case PGRES_COPY_OUT: {
-                        task->errorMessage = "COPY not supported";
+                        SetTaskError(task,"COPY not supported");
                         task->polling_status = 0;
                         task->state = CRON_TASK_ERROR;
                         break;
@@ -521,31 +563,43 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             }
             PQfinish(connection);
 
+
             task->conn = NULL;
             task->polling_status = 0;
             task->isSocketReady = false;
             if (task->state != CRON_TASK_ERROR) {
                 elog(LOG, "my_nedo_cron: job %ld completed", key);
+
                 task->state = CRON_TASK_DONE;
+                UpdateRunDetailsFinish(task->runId, "succeeded", "OK", GetCurrentTimestamp());
+
             }
             break;
 
         }
         case CRON_TASK_ERROR: {
-            if (connection != NULL) {
-                PQfinish(connection);
-                task->conn = NULL;
+
+            if (task->runId !=0 ) {
+                UpdateRunDetailsFinish(task->runId, "failed", task->errorMessage, GetCurrentTimestamp());
+
             }
+
+
+
             if (!task->isActive) {
                 bool found = false;
                 hash_search(CronTaskHashTable, &key, HASH_REMOVE, &found);
-
+                break;
             }
 
             if (task->errorMessage != NULL) {
                 elog(LOG, "error running job %ld: %s", key, task->errorMessage);
             }
 
+            if (connection != NULL) {
+                PQfinish(connection);
+                task->conn = NULL;
+            }
             task->state=CRON_TASK_DONE;
             task->polling_status=0;
             task->startDeadline=0;

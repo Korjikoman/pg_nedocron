@@ -1,3 +1,6 @@
+#ifndef MY_EXTENSION_NEDO_CRON_CRON_JOB_H
+#define MY_EXTENSION_NEDO_CRON_CRON_JOB_H
+
 #include "postgres.h"
 #include "fmgr.h"
 #include "access/htup.h"
@@ -7,6 +10,9 @@
 #include "datatype/timestamp.h"
 #include "common/hashfn.h"
 #include "utils/hsearch.h"
+#include "miscadmin.h"
+#include "utils/lsyscache.h"
+#include "commands/dbcommands.h"
 
 #define Natts_cron_job 7
 #define Att_cron_job_jobid 1
@@ -52,3 +58,5 @@ Oid CronJobRelationId(void);
 extern PGDLLEXPORT Datum schedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum unschedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum invalidate_job_cache(PG_FUNCTION_ARGS);
+
+#endif

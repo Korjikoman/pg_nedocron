@@ -5,38 +5,48 @@ CREATE SEQUENCE nedo_cron.jobid_seq;
 GRANT USAGE ON SEQUENCE nedo_cron.jobid_seq TO public;
 
 CREATE TABLE nedo_cron.jobs (
-    jobid bigint PRIMARY KEY ,
+    jobid bigint PRIMARY KEY DEFAULT nextval('nedo_cron.jobid_seq'),
     schedule text not null,
-    query text not null,
-    host text not null default 'localhost',
-    port int not null default inet_server_port(),
+    command text not null,
+    nodename text not null default 'localhost',
+    nodeport int not null default coalesce(inet_server_port(), current_setting('port')::int),
     database text not null default current_database(),
     username text not null default current_user
 );
 
-CREATE TABLE nedo_cron.results (
-    resultid bigint primary key,
-    jobid text not null ,
-    start_time timestamptz,
-    end_time timestamptz,
-    status int not null,
-    output text
+ALTER SEQUENCE nedo_cron.jobid_seq OWNED BY nedo_cron.jobs.jobid;
+
+CREATE SEQUENCE nedo_cron.run_id_seq;
+GRANT USAGE ON SEQUENCE nedo_cron.run_id_seq TO public;
+
+CREATE TABLE nedo_cron.job_run_details (
+    run_id bigint primary key DEFAULT nextval('nedo_cron.run_id_seq'),
+    jobid bigint not null REFERENCES nedo_cron.jobs (jobid) on DELETE CASCADE,
+    job_pid int,
+    database text,
+    username text,
+    status text not null check ( status in ('starting', 'running', 'succeeded', 'failed', 'timeout', 'cancelled') ),
+    return_message text,
+    start_time timestamptz not null,
+    end_time timestamptz
 );
 
+ALTER SEQUENCE nedo_cron.run_id_seq OWNED BY nedo_cron.job_run_details.run_id;
+CREATE INDEX job_run_details_start_time_index on nedo_cron.job_run_details(jobid, start_time desc );
 
-CREATE FUNCTION  nedo_cron.schedule_job(schedule text, command text)
+CREATE FUNCTION  nedo_cron.schedule(schedule text, command text)
     RETURNS bigint
     LANGUAGE C STRICT
     AS 'MODULE_PATHNAME', $$schedule_job$$;
-    COMMENT ON FUNCTION nedo_cron.schedule_job(text,text)
+    COMMENT ON FUNCTION nedo_cron.schedule(text,text)
         IS 'schedule a job';
 
 
-CREATE FUNCTION  nedo_cron.unschedule_job(bigint)
+CREATE FUNCTION  nedo_cron.unschedule(bigint)
     RETURNS bool
     LANGUAGE C STRICT
     AS 'MODULE_PATHNAME', $$unschedule_job$$;
-    COMMENT ON FUNCTION nedo_cron.unschedule_job(bigint)
+    COMMENT ON FUNCTION nedo_cron.unschedule(bigint)
         IS 'unschedule a job';
 
 CREATE FUNCTION nedo_cron.invalidate_job_cache()

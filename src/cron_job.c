@@ -35,7 +35,7 @@
 
 static Oid CachedCronJobRealtionId = InvalidOid;
 static char *nodename = "localhost";
-static char *CronTableDatabaseName = "postgres";
+
 
 static void invalidate_job_cache_internal(void);
 
@@ -225,6 +225,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     Oid userId = GetUserId();
     char* username = GetUserNameFromId(userId, false);
     parsedSchedule = parse(schedule);
+    char * databaseName = get_database_name(MyDatabaseId);
 
     Oid cronSchemaId = InvalidOid;
     Oid cronJobsRelationId = InvalidOid;
@@ -255,7 +256,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     values[Att_cron_job_command - 1] = CStringGetTextDatum(query);
     values[Att_cron_job_nodename - 1] = CStringGetTextDatum(nodename);
     values[Att_cron_job_nodeport - 1] = Int32GetDatum(PostPortNumber);
-    values[Att_cron_job_database - 1] = CStringGetTextDatum(CronTableDatabaseName);
+    values[Att_cron_job_database - 1] = CStringGetTextDatum(databaseName);
     values[Att_cron_job_username - 1] = CStringGetTextDatum(username);
 
     cronSchemaId = get_namespace_oid(CRON_SCHEMA_NAME, false);
@@ -319,8 +320,13 @@ Datum unschedule_job(PG_FUNCTION_ARGS) {
 }
 
 Datum invalidate_job_cache(PG_FUNCTION_ARGS) {
+    if (!CALLED_AS_TRIGGER(fcinfo)) {
+        elog(ERROR, "invalidate_job_cache must be called as a trigger");
+    }
+
+
     invalidate_job_cache_internal();
-    PG_RETURN_NULL();
+    PG_RETURN_POINTER(NULL);
 }
 
 static void invalidate_job_cache_internal(void) {
