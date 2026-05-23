@@ -58,5 +58,5 @@ Oid CronJobRelationId(void);
 extern PGDLLEXPORT Datum schedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum unschedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum invalidate_job_cache(PG_FUNCTION_ARGS);
-
+extern PGDLLEXPORT Datum check_schedule(PG_FUNCTION_ARGS);
 #endif

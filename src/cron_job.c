@@ -44,6 +44,8 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     bool found = false;
     int64 jobKey = 0;
     CronSchedule * schedule = NULL;
+    char * scheduleText = NULL;
+    CronJob * job = NULL;
 
     Datum jobid = heap_getattr(heap_tuple, Att_cron_job_jobid, desc, &isNull);
     Datum schedule_text = heap_getattr(heap_tuple, Att_cron_job_schedule, desc, &isNull);
@@ -56,27 +58,28 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     Assert(!HeapTupleHasNulls(heap_tuple));
 
     jobKey = DatumGetInt64(jobid);
-    CronJob * job  = hash_search(CronJobHashTable, &jobKey, HASH_ENTER, &found);
+
+    scheduleText = TextDatumGetCString(schedule_text);
+
+    schedule = parse(scheduleText);
+    if (schedule == NULL) {
+        elog(WARNING, "my_nedo_cron: skipping job %ld with invalid schedule: %s",
+               jobKey, scheduleText);
+        return NULL;
+    }
+
+    job  = hash_search(CronJobHashTable, &jobKey, HASH_ENTER, &found);
 
     job->jobId  = DatumGetInt64(jobid);
     job->command = TextDatumGetCString(command);
     job->scheduleText = TextDatumGetCString(schedule_text);
+    job->schedule = *schedule;
     job->nodeName = TextDatumGetCString(nodename);
     job->nodePort = DatumGetInt32(nodeport);
     job->database = TextDatumGetCString(db);
     job->userName = TextDatumGetCString(username);
 
-    schedule = parse(job->scheduleText);
-    if (schedule != NULL) {
-        job->schedule = *schedule;
-        free_cron_schedule(schedule);
-    }
-
-    else {
-        elog(LOG, "error parsing schedule %s for jobId=%ld", job->scheduleText, job->jobId);
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE)),
-            errmsg("invalid schedule--> \" %s \" for jobId=%ld", job->scheduleText, job->jobId));
-    }
+    free_cron_schedule(schedule);
 
     return job;
 
@@ -179,7 +182,11 @@ List * LoadJobsList() {
 
         oldContext = MemoryContextSwitchTo(CronJobContext);
         job = TupleToJob(tuple_desc, heap_tuple);
-        jobs = lappend(jobs, job);
+
+        if (job != NULL) {
+            jobs = lappend(jobs, job);
+        }
+
 
         MemoryContextSwitchTo(oldContext);
         heap_tuple  = systable_getnext(scan_desc);
@@ -215,6 +222,18 @@ Oid CronJobRelationId(void) {
     return CachedCronJobRealtionId;
 }
 
+Datum check_schedule(PG_FUNCTION_ARGS) {
+    CronSchedule * schedule = NULL;
+    text * scheduleText = PG_GETARG_TEXT_P(0);
+    char * scheduleChar = text_to_cstring(scheduleText);
+    schedule = parse(scheduleChar);
+    if (schedule == NULL) {
+        PG_RETURN_BOOL(false);
+    }
+    free_cron_schedule(schedule);
+    PG_RETURN_BOOL(true);
+}
+
 Datum schedule_job(PG_FUNCTION_ARGS) {
     text *scheduleText = PG_GETARG_TEXT_P(0);
     text *queryText = PG_GETARG_TEXT_P(1);
@@ -234,7 +253,6 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     Datum jobIdDatum = 0;
     int64 jobId = 0;
     if (parsedSchedule == NULL) {
-        free(parsedSchedule);
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE)), errmsg("invalid schedule: %s", schedule));
     }
 

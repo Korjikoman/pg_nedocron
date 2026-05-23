@@ -263,7 +263,7 @@ bool get_bounds(int *min_value, int* max_value, FieldType type) {
             *max_value = 31;
             return true;
         case CRON_DOW:
-            *min_value = 1;
+            *min_value = 0;
             *max_value = 7;
             return true;
     }

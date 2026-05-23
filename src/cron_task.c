@@ -12,6 +12,16 @@ void InitCronTask(CronTask *task, int64 jobId) {
     task->isSocketReady = false;
 }
 
+void ResetCronTaskAfterRun(CronTask *task) {
+    task->runId = 0;
+    task->state = CRON_TASK_WAITING;
+    task->polling_status = 0;
+    task->startDeadline = 0;
+    task->conn = NULL;
+    task->errorMessage = NULL;
+    task->isSocketReady = false;
+}
+
 
 CronTask * getCronTask(int64 jobId) {
     CronTask * task;

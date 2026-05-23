@@ -49,4 +49,5 @@ CronTask * getCronTask(int64 jobId);
 extern void ManageCronTask(CronTask *cronState, TimestampTz currentTime);
 void WaitForEvent(List *taskList);
 void InitCronTask(CronTask *task, int64 jobId);
+void ResetCronTaskAfterRun(CronTask *task) ;
 #endif

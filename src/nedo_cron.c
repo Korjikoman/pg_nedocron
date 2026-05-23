@@ -44,12 +44,13 @@ const char *tabname = "nedo_cron jobs";
 char *NedoCronDatabaseName = "postgres";
 static char *extension_name = "nedo_cron";
 int TaskTimeout = 10000; // 10sec
-
+int maxPendingTasks = 20;
 
 PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(schedule_job);
 PG_FUNCTION_INFO_V1(unschedule_job);
 PG_FUNCTION_INFO_V1(invalidate_job_cache);
+PG_FUNCTION_INFO_V1(check_schedule);
 
 
 void _PG_init(void);
@@ -609,13 +610,18 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
         case CRON_TASK_DONE:
         default: {
-            InitCronTask(task, key);
+            if (task->pendingRunCount > maxPendingTasks) {
+                task->pendingRunCount = maxPendingTasks;
+            }
+            ResetCronTaskAfterRun(task);
+
+
+            break;
         }
 
 
     }
 }
-
 
 
 void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz lastMinute, TimestampTz currentTime) {

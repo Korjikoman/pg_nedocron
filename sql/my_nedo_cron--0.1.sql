@@ -4,9 +4,17 @@ GRANT USAGE ON SCHEMA nedo_cron TO public;
 CREATE SEQUENCE nedo_cron.jobid_seq;
 GRANT USAGE ON SEQUENCE nedo_cron.jobid_seq TO public;
 
+
+CREATE FUNCTION nedo_cron.check_schedule(schedule text)
+    RETURNS bool
+    LANGUAGE C STRICT
+    AS 'MODULE_PATHNAME', $$check_schedule$$;
+COMMENT ON FUNCTION nedo_cron.check_schedule(schedule text)
+        IS 'check if inserted schedule is valid';
+
 CREATE TABLE nedo_cron.jobs (
     jobid bigint PRIMARY KEY DEFAULT nextval('nedo_cron.jobid_seq'),
-    schedule text not null,
+    schedule text not null check ( nedo_cron.check_schedule(schedule) ),
     command text not null,
     nodename text not null default 'localhost',
     nodeport int not null default coalesce(inet_server_port(), current_setting('port')::int),
@@ -18,6 +26,8 @@ ALTER SEQUENCE nedo_cron.jobid_seq OWNED BY nedo_cron.jobs.jobid;
 
 CREATE SEQUENCE nedo_cron.run_id_seq;
 GRANT USAGE ON SEQUENCE nedo_cron.run_id_seq TO public;
+
+
 
 CREATE TABLE nedo_cron.job_run_details (
     run_id bigint primary key DEFAULT nextval('nedo_cron.run_id_seq'),
@@ -55,6 +65,7 @@ CREATE FUNCTION nedo_cron.invalidate_job_cache()
     AS 'MODULE_PATHNAME', $$invalidate_job_cache$$;
     COMMENT ON FUNCTION nedo_cron.invalidate_job_cache()
         IS 'invalidate job cache';
+
 
 CREATE TRIGGER cron_job_cache_invalidate
     AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE
