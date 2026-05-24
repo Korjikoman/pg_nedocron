@@ -6,13 +6,28 @@
 #define SPACE_DELIMITER ' '
 #define STAR "*"
 #define STEP_DELIMITER '/'
-
+#define LAST_DOM_TOKEN "$"
+#define MAX_DAYS_IN_MONTH 31
 
 bool is_leap_year(int year) {
     if (year % 400 == 0) return true;
 
     if (year % 100 == 0) return false;
     return year % 4 == 0;
+}
+
+bool search_for_cron_name(const CronName * names, const char * token , int * value) {
+    for (int i = 0; names[i].name != NULL; i++) {
+        if (pg_strcasecmp(names[i].name, token) == 0) {
+            *value = names[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+bool isLastDayOfMonth(int current_dom, int current_month, int current_year) {
+    int daysInCurrentMonth = days_in_month(current_year, current_month);
+    return daysInCurrentMonth == current_dom;
 }
 
 int days_in_month(int year, int month) {
@@ -172,12 +187,16 @@ bool isStar(const char * string) {
     return strcmp(string, STAR) == 0;
 }
 
+bool is_last_dom_token(const char * token) {
+    return token != NULL && strcmp(token, LAST_DOM_TOKEN) == 0;
+}
 
 
-bool parse_range(char* string, int* start, int* finish) {
+bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * start, int* finish) {
 
     if (!string || !start || !finish) return false;
     char ** splittedString = str_split(string, RANGE_OF_NUMBERS_DELIMITER);
+
     if (!splittedString) return false;
 
 
@@ -185,12 +204,18 @@ bool parse_range(char* string, int* start, int* finish) {
         free_string_array(splittedString);
         return false;
     }
-
-    if (!parse_integer(splittedString[0], start) || !parse_integer(splittedString[1], finish) ) {
+    if (!parse_field_value(scheduler, type, splittedString[0], start)) {
         free_string_array(splittedString);
         return false;
-
     }
+
+    if (type == CRON_DOM && is_last_dom_token(splittedString[1])) {
+        *finish = MAX_DAYS_IN_MONTH;
+    }else if (!parse_field_value(scheduler, type, splittedString[0], start) || !parse_field_value(scheduler, type, splittedString[1], finish) ) {
+        free_string_array(splittedString);
+        return false;
+    }
+
     free_string_array(splittedString);
     return true;
 }
@@ -308,6 +333,20 @@ bool set_field_value(CronSchedule* scheduler, FieldType type, int value) {
     return false;
 }
 
+bool parse_field_value(CronSchedule* scheduler, FieldType type, char * token, int *value) {
+    if (parse_integer(token, value)) {
+        return true;
+    }
+
+    if (type == CRON_M) {
+        return search_for_cron_name(month_names, token, value);
+    }
+    if (type == CRON_DOW) {
+        return search_for_cron_name(dow_names, token, value);
+    }
+    return false;
+}
+
 int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
 
     int min_value;
@@ -321,6 +360,14 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
     if (scheduler == NULL || item == NULL || *item == '\0') return false;
 
     if (!get_bounds(&min_value, &max_value, type)) return false;
+
+    if (is_last_dom_token(item)) {
+        if (type != CRON_DOM) return false;
+
+        scheduler->LAST_DOM = true;
+
+        return true;
+    }
 
     if (isStar(item)) {
         bool ok = set_field_range(scheduler, type, min_value, max_value, 1);
@@ -348,9 +395,12 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
         }
 
         if (isStar(step_parts[0])) {
-            bool ok;
-
-            ok = set_field_range(scheduler, type, min_value, max_value, step);
+            bool ok = set_field_range(scheduler, type, min_value, max_value, step);
+            free_string_array(step_parts);
+            return ok;
+        }
+        if (type == CRON_DOM && is_last_dom_token(step_parts[0])) {
+            bool ok = set_field_range(scheduler, type, min_value, max_value, step);
             free_string_array(step_parts);
             return ok;
         }
@@ -358,7 +408,7 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
         if (strchr(step_parts[0], RANGE_OF_NUMBERS_DELIMITER) != NULL) {
             bool ok;
 
-            ok = parse_range(step_parts[0], &start, &finish) && set_field_range(scheduler, type, start, finish, step);
+            ok = parse_range(scheduler, step_parts[0], type, &start, &finish) && set_field_range(scheduler, type, start, finish, step);
             free_string_array(step_parts);
             return ok;
         }
@@ -369,12 +419,13 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type) {
 
     if (strchr(item, RANGE_OF_NUMBERS_DELIMITER) != NULL) {
 
-        return parse_range(item, &start, &finish) && set_field_range(scheduler, type, start, finish, 1);
+        return parse_range(scheduler, item, type, &start, &finish) && set_field_range(scheduler, type, start, finish, 1);
     }
 
-    if (parse_integer(item, &number)) {
+    if (parse_field_value(scheduler, type, item, &number)) {
         return set_field_value(scheduler, type, number);
     }
+
 
     return false;
 
@@ -413,7 +464,7 @@ CronSchedule* parse(char * command) {
     char ** fields = str_split(command, SPACE_DELIMITER);
     int countFields = charArrayLength(fields);
     if (countFields != 5) {
-        free(fields);
+        free_string_array(fields);
         return NULL;
     }
 

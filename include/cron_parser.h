@@ -4,12 +4,13 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
-
+#include "postgres.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
 #include <limits.h>
+#include "port.h"
 
 typedef enum FieldType {
     CRON_MINUTE = 0,
@@ -30,14 +31,42 @@ typedef struct CronSchedule {
     bool HOUR_STAR;
     bool DOW_STAR;
     bool DOM_STAR;
+    bool LAST_DOM;
 } CronSchedule;
 
+typedef struct CronName {
+    const char * name;
+    int value;
+}CronName;
+
+static const CronName seconds_names[] = {
+    {"JAN", 1}, {"FEB", 2}, {"MAR", 3}, {"APR", 4},
+  {"MAY", 5}, {"JUN", 6}, {"JUL", 7}, {"AUG", 8},
+  {"SEP", 9}, {"OCT", 10}, {"NOV", 11}, {"DEC", 12},
+  {NULL, 0}
+};
+
+
+static const CronName month_names[] = {
+    {"JAN", 1}, {"FEB", 2}, {"MAR", 3}, {"APR", 4},
+  {"MAY", 5}, {"JUN", 6}, {"JUL", 7}, {"AUG", 8},
+  {"SEP", 9}, {"OCT", 10}, {"NOV", 11}, {"DEC", 12},
+  {NULL, 0}
+};
+
+
+static const CronName dow_names[] = {
+    {"SUN", 0}, {"MON", 1}, {"TUE", 2}, {"WED", 3},
+      {"THU", 4}, {"FRI", 5}, {"SAT", 6},
+      {NULL, 0}
+};
 
 
 bool parse_integer(char * string, int * resultInt);
 int parse_field_item(CronSchedule* scheduler, char * item, FieldType type);
 int parse_cron_field(CronSchedule* scheduler, char * field, FieldType type);
-bool parse_range(char* string, int* start, int* finish);
+bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * start, int* finish);
+bool parse_field_value(CronSchedule* scheduler, FieldType type, char * token, int *value);
 CronSchedule* parse(char * command);
 
 void free_cron_schedule(CronSchedule * schedule);
@@ -52,5 +81,6 @@ bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int fi
 bool get_bounds(int *min_value, int* max_value, FieldType type);
 bool is_leap_year(int year);
 int days_in_month(int year, int month);
+bool isLastDayOfMonth(int current_dom, int current_month, int current_year);
 
 #endif //MY_EXTENSION_NEDO_CRON_CRON_PARSER_H

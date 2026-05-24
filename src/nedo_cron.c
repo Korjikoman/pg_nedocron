@@ -730,20 +730,26 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
               bool fixedHourOrMinute) {
     time_t currentTime_t = timestamptz_to_time_t(currentTime);
     struct tm *tm = gmtime(&currentTime_t);
-    bool shouldRun = false;
+
 
     int minute = tm->tm_min;
     int hour = tm->tm_hour;
     int dayOfMonth = tm->tm_mday;
     int month = tm->tm_mon + 1;
     int dayOfWeek = tm->tm_wday;
+    int year = tm->tm_year + 1900; // tm_year в struct tm хранит не полный год, а
+                                    // количество лет с 1900 года
 
     bool dayOfMonthAndDayOfWeek = false;
+    bool isLastDOM = isLastDayOfMonth(dayOfMonth, month, year);
+    bool dayOfMonthMatches = schedule->dayOfMonth[dayOfMonth] || (schedule->LAST_DOM && isLastDOM);
+    bool dayOfWeekMatches = schedule->dayOfWeek[dayOfWeek];
+
     if (schedule->DOM_STAR || schedule->DOW_STAR) {
-        dayOfMonthAndDayOfWeek = schedule->dayOfMonth[dayOfMonth] && schedule->dayOfWeek[dayOfWeek];
+        dayOfMonthAndDayOfWeek = dayOfMonthMatches && dayOfWeekMatches;
     }
     else {
-        dayOfMonthAndDayOfWeek = schedule->dayOfMonth[dayOfMonth] || schedule->dayOfWeek[dayOfWeek];
+        dayOfMonthAndDayOfWeek = dayOfMonthMatches || dayOfWeekMatches;
     }
 
 
