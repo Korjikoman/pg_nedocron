@@ -11,6 +11,18 @@
 #include <string.h>
 #include <limits.h>
 #include "port.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+
+
+
+
+
+#define CRON_PARSE_ERROR_MESSAGE_LEN 256
+#define CRON_PARSE_ERROR_TOKEN_LEN 64
+
 
 typedef enum FieldType {
     CRON_MINUTE = 0,
@@ -32,12 +44,22 @@ typedef struct CronSchedule {
     bool DOW_STAR;
     bool DOM_STAR;
     bool LAST_DOM;
+    bool SECONDS;
+    int secondsInterval;
 } CronSchedule;
 
 typedef struct CronName {
     const char * name;
     int value;
 }CronName;
+
+
+typedef struct CronParseError {
+    char message[CRON_PARSE_ERROR_MESSAGE_LEN];
+    char token[CRON_PARSE_ERROR_TOKEN_LEN];
+    int fieldIndex;
+    int tokenIndex;
+}CronParseError;
 
 static const CronName seconds_names[] = {
     {"JAN", 1}, {"FEB", 2}, {"MAR", 3}, {"APR", 4},
@@ -62,22 +84,31 @@ static const CronName dow_names[] = {
 };
 
 
+CronSchedule* parse(char * command);
+CronSchedule *parse_with_error(char *command, CronParseError *error);
+
+int parse_cron_field(CronSchedule* scheduler, char *field, FieldType type, int fieldIndex, CronParseError* error);
+int parse_field_item(CronSchedule* scheduler, char * item, FieldType type, int fieldIndex,
+    int tokenIndex, CronParseError *error);
+
 bool parse_integer(char * string, int * resultInt);
-int parse_field_item(CronSchedule* scheduler, char * item, FieldType type);
-int parse_cron_field(CronSchedule* scheduler, char * field, FieldType type);
 bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * start, int* finish);
 bool parse_field_value(CronSchedule* scheduler, FieldType type, char * token, int *value);
-CronSchedule* parse(char * command);
 
+bool set_field_value(CronSchedule* scheduler, FieldType type, int value, int fieldIndex,
+    int tokenIndex, const char * token, CronParseError * error);
 void free_cron_schedule(CronSchedule * schedule);
 void free_string_array(char** array);
-bool set_field_value(CronSchedule* scheduler, FieldType type, int value);
 int charArrayLength(char ** charArray);
 char ** str_split(char * a_str, const char a_delim);
 void fillBooleanArray(bool *array, int start, int finish, int step, bool value);
 bool isStar(const char * string);
 bool isEnumeration(char * string);
-bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int finish, int step);
+bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int finish, int step,
+    int fieldIndex,
+    int tokenIndex,
+    const char *token,
+    CronParseError *error);
 bool get_bounds(int *min_value, int* max_value, FieldType type);
 bool is_leap_year(int year);
 int days_in_month(int year, int month);

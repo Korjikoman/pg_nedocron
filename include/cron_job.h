@@ -55,6 +55,8 @@ void ReloadCronJobs(void);
 CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple);
 bool CronLoaded(void);
 Oid CronJobRelationId(void);
+CronJob * getCronJob(int64 jobId);
+
 extern PGDLLEXPORT Datum schedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum unschedule_job(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum invalidate_job_cache(PG_FUNCTION_ARGS);

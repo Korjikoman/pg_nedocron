@@ -46,6 +46,7 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     CronSchedule * schedule = NULL;
     char * scheduleText = NULL;
     CronJob * job = NULL;
+    CronParseError parse_error;
 
     Datum jobid = heap_getattr(heap_tuple, Att_cron_job_jobid, desc, &isNull);
     Datum schedule_text = heap_getattr(heap_tuple, Att_cron_job_schedule, desc, &isNull);
@@ -61,10 +62,18 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
 
     scheduleText = TextDatumGetCString(schedule_text);
 
-    schedule = parse(scheduleText);
-    if (schedule == NULL) {
-        elog(WARNING, "my_nedo_cron: skipping job %ld with invalid schedule: %s",
-               jobKey, scheduleText);
+
+    schedule = parse_with_error(scheduleText, &parse_error);
+
+    if (schedule == NULL)
+    {
+        elog(WARNING,
+             "my_nedo_cron: invalid schedule for job %ld at field %d near \"%s\": %s",
+             jobKey,
+             parse_error.fieldIndex,
+             parse_error.token,
+             parse_error.message);
+
         return NULL;
     }
 
@@ -84,6 +93,17 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     return job;
 
 }
+
+CronJob * getCronJob(int64 jobId) {
+    CronJob * job = NULL;
+    int64 hashKey = jobId;
+    bool found = false;
+
+    job = hash_search(CronJobHashTable, &hashKey, HASH_FIND, &found);
+
+    return job;
+}
+
 
 
 void ReloadCronJobs(void) {
@@ -237,13 +257,13 @@ Datum check_schedule(PG_FUNCTION_ARGS) {
 Datum schedule_job(PG_FUNCTION_ARGS) {
     text *scheduleText = PG_GETARG_TEXT_P(0);
     text *queryText = PG_GETARG_TEXT_P(1);
-
-    char* schedule = text_to_cstring(scheduleText);
+    CronParseError parseError;
+    char* scheduleChar = text_to_cstring(scheduleText);
     char* query = text_to_cstring(queryText);
-    CronSchedule *parsedSchedule = NULL;
+    CronSchedule *schedule = NULL;
     Oid userId = GetUserId();
     char* username = GetUserNameFromId(userId, false);
-    parsedSchedule = parse(schedule);
+    schedule = parse_with_error(scheduleChar, &parseError);
     char * databaseName = get_database_name(MyDatabaseId);
 
     Oid cronSchemaId = InvalidOid;
@@ -252,11 +272,24 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     Datum jobIdSeqName = 0;
     Datum jobIdDatum = 0;
     int64 jobId = 0;
-    if (parsedSchedule == NULL) {
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE)), errmsg("invalid schedule: %s", schedule));
+    if (schedule == NULL)
+    {
+        if (parseError.fieldIndex > 0 && parseError.token[0] != '\0')
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid schedule at field %d near \"%s\": %s",
+                            parseError.fieldIndex,
+                            parseError.token,
+                            parseError.message)));
+        }
+
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("invalid schedule: %s", parseError.message)));
     }
 
-    free(parsedSchedule);
+    free(schedule);
 
     jobIdSeqName = CStringGetTextDatum(JOB_ID_SEQUENCE_NAME);
     jobIdDatum = DirectFunctionCall1(nextval, jobIdSeqName);
@@ -270,7 +303,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     memset(isNulls, false, sizeof(isNulls));
 
     values[Att_cron_job_jobid - 1] = jobIdDatum;
-    values[Att_cron_job_schedule - 1] = CStringGetTextDatum(schedule);
+    values[Att_cron_job_schedule - 1] = CStringGetTextDatum(scheduleChar);
     values[Att_cron_job_command - 1] = CStringGetTextDatum(query);
     values[Att_cron_job_nodename - 1] = CStringGetTextDatum(nodename);
     values[Att_cron_job_nodeport - 1] = Int32GetDatum(PostPortNumber);

@@ -1,4 +1,7 @@
 #include "../include/cron_task.h"
+
+#include <utils/timestamp.h>
+
 #include "cron_job.h"
 
 void InitCronTask(CronTask *task, int64 jobId) {
@@ -10,6 +13,7 @@ void InitCronTask(CronTask *task, int64 jobId) {
     task->isActive = true;
     task->errorMessage = NULL;
     task->isSocketReady = false;
+    task->nextRunTime = 0;
 }
 
 void ResetCronTaskAfterRun(CronTask *task) {
@@ -22,6 +26,24 @@ void ResetCronTaskAfterRun(CronTask *task) {
     task->isSocketReady = false;
 }
 
+void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime) {
+    CronJob * job = getCronJob(task->jobId);
+    CronSchedule* schedule = &job->schedule;
+    int intervalMs = 1000 * schedule->secondsInterval;
+
+    if (task->nextRunTime == 0) {
+        task->nextRunTime = TimestampTzPlusMilliseconds(currentTime, intervalMs);
+    }
+
+    if (TimestampDifferenceExceeds(task->nextRunTime, currentTime, 0)) {
+        if (task->pendingRunCount == 0 ) {
+            task->pendingRunCount ++;
+            elog(LOG, "my_nedo_cron: added pending job=%ld for second interval", task->jobId);
+        }
+
+        task->nextRunTime = TimestampTzPlusMilliseconds(currentTime, intervalMs);
+    }
+}
 
 CronTask * getCronTask(int64 jobId) {
     CronTask * task;

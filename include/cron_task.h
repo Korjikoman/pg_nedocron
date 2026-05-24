@@ -37,6 +37,7 @@ typedef struct CronTask
     PostgresPollingStatusType polling_status;
     int pendingRunCount;
     TimestampTz startDeadline;
+    TimestampTz nextRunTime;
     PGconn * conn;
     char * errorMessage;
     bool isActive;
@@ -50,4 +51,5 @@ extern void ManageCronTask(CronTask *cronState, TimestampTz currentTime);
 void WaitForEvent(List *taskList);
 void InitCronTask(CronTask *task, int64 jobId);
 void ResetCronTaskAfterRun(CronTask *task) ;
+void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime);
 #endif

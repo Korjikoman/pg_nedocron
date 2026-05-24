@@ -60,7 +60,6 @@ static void sighupHandler(SIGNAL_ARGS);
 List * LoadTasksList();
 static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool floatingHourOrMinute,bool fixedHourOrMinute) ;
 void StartPendingTasks(List * taskList, TimestampTz currentTime);
-CronJob * getCronJob(int64 jobId);
 void ManageCronTasks(List * tasks, TimestampTz currentTime);
 
 void _PG_init() {
@@ -696,7 +695,7 @@ void StartPendingTasks(List * taskList, TimestampTz currentTime) {
 
     minutesPassed = MinutesPassed(lastMinute, currentTime);
 
-    if (minutesPassed == 0) return ;
+    //if (minutesPassed == 0) return ;
 
     if (minutesPassed > 3 * 60) {
         clock_status = CLOCK_CHANGE;
@@ -716,7 +715,19 @@ void StartPendingTasks(List * taskList, TimestampTz currentTime) {
 
     foreach(taskCell, taskList) {
         CronTask * task = lfirst(taskCell);
-        StartPendingTask(task, clock_status, lastMinute, currentTime);
+        CronJob* job = getCronJob(task->jobId);
+
+        if (job == NULL) {
+            continue;
+        }
+
+
+        if (job->schedule.SECONDS) {
+            StartSecondIntervalTask(task, currentTime);
+        }
+        else if (minutesPassed != 0) {
+            StartPendingTask(task, clock_status, lastMinute, currentTime);
+        }
     }
 
     if (clock_status != CLOCK_JUMP_BACKWARD) {
@@ -731,6 +742,7 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
     time_t currentTime_t = timestamptz_to_time_t(currentTime);
     struct tm *tm = gmtime(&currentTime_t);
 
+    if (schedule->SECONDS) return false;
 
     int minute = tm->tm_min;
     int hour = tm->tm_hour;
@@ -766,12 +778,3 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
 }
 
 
-CronJob * getCronJob(int64 jobId) {
-    CronJob * job = NULL;
-    int64 hashKey = jobId;
-    bool found = false;
-
-    job = hash_search(CronJobHashTable, &hashKey, HASH_FIND, &found);
-
-    return job;
-}
