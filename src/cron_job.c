@@ -289,7 +289,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
                  errmsg("invalid schedule: %s", parseError.message)));
     }
 
-    free(schedule);
+    pfree(schedule);
 
     jobIdSeqName = CStringGetTextDatum(JOB_ID_SEQUENCE_NAME);
     jobIdDatum = DirectFunctionCall1(nextval, jobIdSeqName);

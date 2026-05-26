@@ -38,10 +38,15 @@ typedef struct CronTask
     int pendingRunCount;
     TimestampTz startDeadline;
     TimestampTz nextRunTime;
+    TimestampTz runDeadline;
     PGconn * conn;
     char * errorMessage;
     bool isActive;
     bool isSocketReady;
+
+    bool timedOut;
+    bool cancelRequested;
+
 } CronTask;
 
 

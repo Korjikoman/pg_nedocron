@@ -129,9 +129,9 @@ int days_in_month(int year, int month) {
 void free_string_array(char** array) {
     if (array == NULL) return;
     for (size_t i =0; array[i] != NULL; i++) {
-        free(array[i]);
+        pfree(array[i]);
     }
-    free(array);
+    pfree(array);
 }
 
 
@@ -144,68 +144,37 @@ int charArrayLength(char ** charArray) {
     return counter;
 }
 
-char ** str_split(char * a_str, const char a_delim) {
+char ** str_split(char * str, const char delim) {
+    char * p;
+    char *start;
+    int count = 1;
+    int idx =0;
+    char ** result;
 
-    if (a_str == NULL)
-    {
-        return NULL;
-    }
+    if (str == NULL) {return NULL;}
 
-    char ** result = 0;
-    char * tmp = a_str;
-    char * last_delim = 0;
-    char delim[2];
-    delim[0] = a_delim;
-    delim[1] = 0;
-
-    /* Count how many elements will be extracted. */
-    char *copy = strdup(a_str);
-    if (copy == NULL) {
-        return NULL;
-    }
-    size_t count = 0;
-    char *token= strtok(copy, delim);
-
-    while (token) {
-        count ++;
-        token= strtok(NULL, delim);
-    }
-    free(copy);
-
-    result = malloc(sizeof(char *) * (count+1));
-
-    if (result == NULL) return NULL;
-
-    copy = strdup(a_str);
-    if (copy == NULL) {
-        free(result);
-        return NULL;
-    }
-
-
-    size_t idx = 0;
-    token = strtok(copy, delim);
-
-    while (token) {
-        result[idx] = strdup(token);
-
-        if (result[idx] == NULL) {
-            for (size_t i = 0; i < idx; i++) {
-                free(result[i]);
-            }
-            free(result);
-            free(copy);
-            return NULL;
+    for (p = str; *p !='\0'; p++) {
+        if (*p == delim) {
+            count++;
         }
-
-        idx++;
-        token = strtok(NULL, delim);
     }
 
-    result[idx] = 0;
+    result = palloc0(sizeof(char*) * (count+1));
 
+    start = str;
 
-    free(copy);
+    for (p = str; ; p++) {
+        if (*p == delim || *p == '\0') {
+            int len = p - start;
+            char * part = palloc0(len+1);
+            memcpy(part, start, len);
+            result[idx++] = part;
+            if (*p == '\0') break;
+
+            start = p+1;
+        }
+    }
+    result[idx] = NULL;
     return result;
 }
 
@@ -636,7 +605,7 @@ CronSchedule *parse_with_error(char *command, CronParseError *error) {
     CronSchedule temp = {0};
     char ** fields;
     int countFields;
-
+    CronSchedule *scheduler = NULL;
     clear_parse_error(error);
 
     if (command == NULL || command[0] == '\0') {
@@ -649,20 +618,19 @@ CronSchedule *parse_with_error(char *command, CronParseError *error) {
 
     if (countFields == 2 && strcasecmp(fields[1], SECONDS_IDENTIFIER ) == 0) {
         int seconds = 0;
-        CronSchedule* scheduler = NULL;
         if (!parse_integer(fields[0], &seconds)||
             seconds < 1 || seconds > 59) {
             set_parse_error(error, 1, 1, fields[0], "seconds interval must be 1-59");
             free_string_array(fields);
             return NULL;
             }
-        scheduler = malloc(sizeof(*scheduler));
+        scheduler = palloc0(sizeof(*scheduler));
         if (scheduler == NULL) {
             set_parse_error(error, 0, 0, NULL, "out of memory");
             free_string_array(fields);
             return NULL;
         }
-        memset(scheduler, 0, sizeof(*scheduler));
+
         scheduler->SECONDS = true;
         scheduler->secondsInterval = seconds;
         free_string_array(fields);
@@ -686,7 +654,7 @@ CronSchedule *parse_with_error(char *command, CronParseError *error) {
         return NULL;
     }
 
-    CronSchedule *scheduler = malloc(sizeof(*scheduler));
+    scheduler = palloc0(sizeof(*scheduler));
 
     if (scheduler == NULL) {
         set_parse_error(error, 0, 0, NULL, "out of memory: scheduler is NULL");
@@ -706,5 +674,8 @@ CronSchedule* parse(char * command) {
 }
 
 void free_cron_schedule(CronSchedule * schedule) {
-    free(schedule);
+    if (schedule != NULL) {
+        pfree(schedule);
+
+    }
 }

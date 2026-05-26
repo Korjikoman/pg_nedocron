@@ -14,6 +14,9 @@ void InitCronTask(CronTask *task, int64 jobId) {
     task->errorMessage = NULL;
     task->isSocketReady = false;
     task->nextRunTime = 0;
+    task->runDeadline = 0;
+    task->cancelRequested = false;
+    task->timedOut = false;
 }
 
 void ResetCronTaskAfterRun(CronTask *task) {
