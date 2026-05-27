@@ -10,6 +10,7 @@
 #define MAX_DAYS_IN_MONTH 31
 #define  SECONDS_IDENTIFIER "seconds"
 
+/* Обнуляет структуру ошибки, если вызывающий код хочет подробный error. */
 static void clear_parse_error(CronParseError *error) {
     if (error == NULL) {
         return;
@@ -17,6 +18,7 @@ static void clear_parse_error(CronParseError *error) {
     memset(error, 0, sizeof(*error));
 }
 
+/* Заполняет field/token/message первой понятной ошибкой парсинга. */
 static void set_parse_error(CronParseError* error, int fieldIndex, int tokenIndex, const char * token,
     const char * fmt, ...) {
     va_list args;
@@ -34,6 +36,7 @@ static void set_parse_error(CronParseError* error, int fieldIndex, int tokenInde
     va_end(args);
 }
 
+/* Человекочитаемое имя cron-поля для сообщений об ошибках. */
 static const char *
   field_name(FieldType type)
 {
@@ -54,6 +57,7 @@ static const char *
     return "unknown";
 }
 
+/* Находит пустые части вокруг delimiter: в начале, в конце или подряд. */
 static bool
 has_empty_part(const char *s, char delimiter)
 {
@@ -78,7 +82,7 @@ has_empty_part(const char *s, char delimiter)
 
 
 
-
+/* Проверяет високосный год для расчета последнего дня февраля. */
 bool is_leap_year(int year) {
     if (year % 400 == 0) return true;
 
@@ -86,6 +90,7 @@ bool is_leap_year(int year) {
     return year % 4 == 0;
 }
 
+/* Ищет текстовое имя месяца/дня недели и возвращает его числовое значение. */
 bool search_for_cron_name(const CronName * names, const char * token , int * value) {
     for (int i = 0; names[i].name != NULL; i++) {
         if (pg_strcasecmp(names[i].name, token) == 0) {
@@ -95,11 +100,14 @@ bool search_for_cron_name(const CronName * names, const char * token , int * val
     }
     return false;
 }
+
+/* Проверяет, является ли текущая дата последним днем своего месяца. */
 bool isLastDayOfMonth(int current_dom, int current_month, int current_year) {
     int daysInCurrentMonth = days_in_month(current_year, current_month);
     return daysInCurrentMonth == current_dom;
 }
 
+/* Возвращает количество дней в месяце с учетом високосного февраля. */
 int days_in_month(int year, int month) {
     static const int days[] = {
         0,
@@ -126,6 +134,7 @@ int days_in_month(int year, int month) {
     return days[month];
 }
 
+/* Освобождает NULL-terminated массив строк, созданный str_split(). */
 void free_string_array(char** array) {
     if (array == NULL) return;
     for (size_t i =0; array[i] != NULL; i++) {
@@ -135,6 +144,7 @@ void free_string_array(char** array) {
 }
 
 
+/* Считает элементы NULL-terminated массива строк. */
 int charArrayLength(char ** charArray) {
     if (!charArray) return 0;
     int counter = 0;
@@ -144,6 +154,7 @@ int charArrayLength(char ** charArray) {
     return counter;
 }
 
+/* Делит строку по delimiter, сохраняя пустые части для строгой валидации. */
 char ** str_split(char * str, const char delim) {
     char * p;
     char *start;
@@ -163,6 +174,7 @@ char ** str_split(char * str, const char delim) {
 
     start = str;
 
+    /* Каждая часть копируется отдельно, исходная строка не портится как при strtok. */
     for (p = str; ; p++) {
         if (*p == delim || *p == '\0') {
             int len = p - start;
@@ -178,6 +190,7 @@ char ** str_split(char * str, const char delim) {
     return result;
 }
 
+/* Заполняет диапазон bool-массива с заданным step. */
 void fillBooleanArray(bool *array, int start, int finish, int step, bool value)
 {
     if (array == NULL)
@@ -198,6 +211,7 @@ void fillBooleanArray(bool *array, int start, int finish, int step, bool value)
 }
 
 
+/* Парсит только неотрицательное decimal int без мусора и overflow. */
 bool parse_integer(char * string, int * resultInt) {
     char * endpointer;
     errno = 0;
@@ -222,15 +236,18 @@ bool parse_integer(char * string, int * resultInt) {
     return true;
 }
 
+/* Проверяет, что token является "*". */
 bool isStar(const char * string) {
     return strcmp(string, STAR) == 0;
 }
 
+/* Проверяет специальный token "$" для последнего дня месяца. */
 bool is_last_dom_token(const char * token) {
     return token != NULL && strcmp(token, LAST_DOM_TOKEN) == 0;
 }
 
 
+/* Разбирает диапазон "A-B" и возвращает start/finish без установки битов schedule. */
 bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * start, int* finish) {
 
     if (!string || !start || !finish) return false;
@@ -250,6 +267,7 @@ bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * s
         return false;
     }
 
+    /* В day-of-month разрешено "15-$": конец диапазона считается 31. */
     if (type == CRON_DOM && is_last_dom_token(splittedString[1])) {
         *finish = MAX_DAYS_IN_MONTH;
     }else if (!parse_field_value(scheduler, type, splittedString[1], finish) ) {
@@ -261,6 +279,7 @@ bool parse_range(CronSchedule * scheduler, char* string, FieldType type, int * s
     return true;
 }
 
+/* Проверяет, что token выглядит как список из нескольких элементов. */
 bool isEnumeration(char * string) {
     char ** splitted = str_split(string, ARRAY_OF_NUMBERS_DELIMITER);
     if (!splitted) return false;
@@ -272,6 +291,7 @@ bool isEnumeration(char * string) {
     return true;
 }
 
+/* Устанавливает все значения диапазона в конкретном cron-поле. */
 bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int finish, int step,
     int fieldIndex,
     int tokenIndex,
@@ -299,6 +319,7 @@ bool set_field_range(CronSchedule * scheduler, FieldType type, int start, int fi
     return true;
 }
 
+/* Запоминает, что поле было задано звездочкой. Это важно для DOM/DOW semantics. */
 static void mark_star_field(CronSchedule *scheduler, FieldType type) {
     switch (type) {
         case CRON_MINUTE:
@@ -319,6 +340,7 @@ static void mark_star_field(CronSchedule *scheduler, FieldType type) {
 }
 
 
+/* Возвращает допустимые границы числовых значений для cron-поля. */
 bool get_bounds(int *min_value, int* max_value, FieldType type) {
     if (min_value == NULL || max_value == NULL) {
         return false;
@@ -350,6 +372,7 @@ bool get_bounds(int *min_value, int* max_value, FieldType type) {
 
 }
 
+/* Валидирует одно числовое значение и отмечает соответствующий бит в schedule. */
 bool set_field_value(CronSchedule* scheduler, FieldType type, int value, int fieldIndex,
     int tokenIndex, const char * token, CronParseError * error) {
 
@@ -389,6 +412,7 @@ bool set_field_value(CronSchedule* scheduler, FieldType type, int value, int fie
             return true;
         case CRON_DOW:
             if (value == 7) {
+                /* В cron и 0, и 7 обозначают Sunday. */
                 value = 0;
             }
             scheduler->dayOfWeek[value] = true;
@@ -398,6 +422,7 @@ bool set_field_value(CronSchedule* scheduler, FieldType type, int value, int fie
     return false;
 }
 
+/* Парсит число или имя месяца/дня недели в одно int-значение. */
 bool parse_field_value(CronSchedule* scheduler, FieldType type, char * token, int *value) {
     if (parse_integer(token, value)) {
         return true;
@@ -412,6 +437,7 @@ bool parse_field_value(CronSchedule* scheduler, FieldType type, char * token, in
     return false;
 }
 
+/* Разбирает один элемент поля: "*", число, список, диапазон или step. */
 int parse_field_item(CronSchedule* scheduler, char * item, FieldType type, int fieldIndex,
     int tokenIndex, CronParseError *error) {
 
@@ -459,6 +485,7 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type, int f
 
     if (strchr(item, STEP_DELIMITER) != NULL) {
 
+        /* Пустая часть в step почти всегда означает лишний delimiter. */
         if (has_empty_part(item, STEP_DELIMITER)) {
             set_parse_error(error, fieldIndex, tokenIndex, item, "invalid step syntax");
             return false;
@@ -557,6 +584,7 @@ int parse_field_item(CronSchedule* scheduler, char * item, FieldType type, int f
     return false;
 }
 
+/* Разбирает одно cron-поле, разделяя его на элементы списка через запятую. */
 int parse_cron_field(CronSchedule* scheduler, char *field, FieldType type, int fieldIndex, CronParseError* error) {
     char **items;
     int count;
@@ -601,6 +629,7 @@ int parse_cron_field(CronSchedule* scheduler, char *field, FieldType type, int f
 
 }
 
+/* Основной парсер: поддерживает 5 cron-полей или специальный формат "N seconds". */
 CronSchedule *parse_with_error(char *command, CronParseError *error) {
     CronSchedule temp = {0};
     char ** fields;
@@ -616,6 +645,7 @@ CronSchedule *parse_with_error(char *command, CronParseError *error) {
     fields = str_split(command, SPACE_DELIMITER);
     countFields = charArrayLength(fields);
 
+    /* Seconds interval взаимно исключает обычные minute/hour/day/month поля. */
     if (countFields == 2 && strcasecmp(fields[1], SECONDS_IDENTIFIER ) == 0) {
         int seconds = 0;
         if (!parse_integer(fields[0], &seconds)||
@@ -669,10 +699,12 @@ CronSchedule *parse_with_error(char *command, CronParseError *error) {
 
 }
 
+/* Совместимый wrapper: старый API без подробной ошибки. */
 CronSchedule* parse(char * command) {
     return parse_with_error(command, NULL);
 }
 
+/* Освобождает CronSchedule, выделенный parser-ом через palloc0. */
 void free_cron_schedule(CronSchedule * schedule) {
     if (schedule != NULL) {
         pfree(schedule);

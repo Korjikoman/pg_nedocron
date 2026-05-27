@@ -80,6 +80,7 @@ static void RegisterCronJobRelcacheCallbackIfNeeded(void);
 
 
 
+/* Callback от PostgreSQL shared invalidation: сбрасывает локальный cache jobs. */
 static void CronJobRelcacheCallback(Datum arg, Oid relid) {
     Oid jobsRelid = DatumGetObjectId(arg);
     if (relid == InvalidOid || relid == jobsRelid) {
@@ -88,6 +89,7 @@ static void CronJobRelcacheCallback(Datum arg, Oid relid) {
     }
 }
 
+/* Регистрирует relcache callback после появления nedo_cron.jobs. */
 static void RegisterCronJobRelcacheCallbackIfNeeded(void) {
     Oid schemaId = InvalidOid;
     Oid jobsRelid = InvalidOid;
@@ -96,6 +98,7 @@ static void RegisterCronJobRelcacheCallbackIfNeeded(void) {
         return;
     }
 
+    /* OID таблицы ищется в короткой transaction, потому что syscache требует snapshot. */
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
     PushActiveSnapshot(GetTransactionSnapshot());
@@ -121,12 +124,14 @@ static void RegisterCronJobRelcacheCallbackIfNeeded(void) {
     CronJobRelcacheCallbackRegistered = true;
 }
 
+/* Точка входа extension library: объявляет GUC-и и регистрирует background worker. */
 void _PG_init() {
     BackgroundWorker worker;
     char * func_name = "PgOctopusWorkerMain";
 
     memset(&worker, 0, sizeof(BackgroundWorker));
 
+    /* Background worker можно регистрировать только при загрузке через shared_preload_libraries. */
     if (!process_shared_preload_libraries_in_progress) {
         return;
     }
@@ -170,6 +175,7 @@ void _PG_init() {
     RegisterBackgroundWorker(&worker);
 }
 
+/* Форматирует и сохраняет ошибку task в CronTaskContext. */
 static void SetTaskError(CronTask * task, const char * fmt, ...) {
     MemoryContext old_context;
     va_list args;
@@ -187,6 +193,8 @@ static void SetTaskError(CronTask * task, const char * fmt, ...) {
     task->errorMessage = pstrdup(message);
     MemoryContextSwitchTo(old_context);
 }
+
+/* SIGTERM не делает тяжелую работу в handler-е, только будит основной цикл. */
 static void sigtermHandler(SIGNAL_ARGS) {
     int save_errno = errno;
     sigtermFlag = true;
@@ -195,6 +203,7 @@ static void sigtermHandler(SIGNAL_ARGS) {
 }
 
 
+/* SIGHUP будит worker, чтобы основной цикл перечитал конфигурацию. */
 static void sighupHandler(SIGNAL_ARGS) {
     int save_errno = errno;
     sighupFlag = true;
@@ -203,6 +212,7 @@ static void sighupHandler(SIGNAL_ARGS) {
 }
 
 
+/* Main loop background worker-а: reload jobs, schedule due tasks, wait, advance tasks. */
 void PgOctopusWorkerMain(Datum arg) {
     MemoryContext loop_memory_context = NULL;
     TimestampTz lastJobReloadTime = 0;
@@ -213,7 +223,7 @@ void PgOctopusWorkerMain(Datum arg) {
 
     BackgroundWorkerUnblockSignals(); // разблокируем сигналы для bgw
 
-    // connecting to db
+    /* Worker подключается к metadata DB, где лежат nedo_cron.jobs. */
     BackgroundWorkerInitializeConnection(NedoCronDatabaseName, NULL, BGWORKER_BYPASS_ALLOWCONN | BGWORKER_BYPASS_ALLOWCONN);
 
     CronJobContext = AllocSetContextCreate(CurrentMemoryContext,
@@ -245,12 +255,14 @@ void PgOctopusWorkerMain(Datum arg) {
         List* cronTasks = NIL;
         TimestampTz currentTime = GetCurrentTimestamp();
 
+        /* Принимаем relcache invalidation, пришедшие из пользовательских backends. */
         AcceptInvalidationMessages();
         RegisterCronJobRelcacheCallbackIfNeeded();
 
         if (sighupFlag) {
             sighupFlag = false;
             ProcessConfigFile(PGC_SIGHUP);
+            /* SIGHUP может изменить runtime-настройки, поэтому перечитываем jobs безопасно. */
             CronJobCacheValid = false;
         }
 
@@ -267,6 +279,7 @@ void PgOctopusWorkerMain(Datum arg) {
 
         WaitForEvent(cronTasks);
 
+        /* После ожидания время могло измениться: используем свежее значение для timeout-ов. */
         currentTime = GetCurrentTimestamp();
         ManageCronTasks(cronTasks, currentTime);
 
@@ -280,6 +293,7 @@ void PgOctopusWorkerMain(Datum arg) {
 }
 
 
+/* Возвращает список всех runtime tasks из hash table для текущей итерации loop-а. */
 List * LoadTasksList() {
     List * tasks = NIL;
     HASH_SEQ_STATUS status;
@@ -292,12 +306,14 @@ List * LoadTasksList() {
     return tasks;
 }
 
+/* Проверяет, должен ли task ждать готовности libpq socket. */
 static bool TaskNeedsSocketWait(CronTask * task) {
     return task->state == CRON_TASK_CONNECTING ||
            task->state == CRON_TASK_SENDING ||
            task->state == CRON_TASK_RUNNING;
 }
 
+/* Преобразует libpq polling_status в события PostgreSQL WaitEventSet. */
 static uint32 TaskWaitEvents(CronTask * task) {
     if (task->polling_status == PGRES_POLLING_READING) {
         return WL_SOCKET_READABLE;
@@ -308,6 +324,7 @@ static uint32 TaskWaitEvents(CronTask * task) {
     return 0;
 }
 
+/* Считает ближайший wake-up: минута, seconds schedule, connect timeout или run timeout. */
 static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime) {
     TimestampTz nextEventTime;
     ListCell * taskCell = NULL;
@@ -320,10 +337,12 @@ static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime) {
         CronTask * task = (CronTask *) lfirst(taskCell);
         CronJob * job = getCronJob(task->jobId);
 
+        /* Если уже есть pending run, не спим: task надо стартовать прямо сейчас. */
         if (task->state == CRON_TASK_WAITING && task->pendingRunCount > 0) {
             return 0;
         }
 
+        /* Seconds jobs будят worker между минутными границами. */
         if (job != NULL && job->schedule.SECONDS && task->nextRunTime != 0) {
             if (TimestampDifferenceExceeds(task->nextRunTime, nextEventTime, 0)) {
                 nextEventTime = task->nextRunTime;
@@ -337,6 +356,7 @@ static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime) {
             }
         }
 
+        /* Running query должен проснуться на worker-side timeout даже без socket event. */
         if (task->state == CRON_TASK_RUNNING && task->runDeadline != 0 && !task->cancelRequested) {
             if (TimestampDifferenceExceeds(task->runDeadline, nextEventTime, 0)) {
                 nextEventTime = task->runDeadline;
@@ -357,6 +377,7 @@ static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime) {
     return timeoutMs;
 }
 
+/* Ждет latch, postmaster death и libpq sockets через PostgreSQL WaitEventSet. */
 void WaitForEvent(List *taskList) {
     WaitEventSet * set = NULL;
     WaitEvent *events = NULL;
@@ -369,6 +390,7 @@ void WaitForEvent(List *taskList) {
 
     foreach(taskCell, taskList) {
         CronTask * task = (CronTask *) lfirst(taskCell);
+        /* Готовность socket одноразовая: каждый wait заново отмечает только сработавшие tasks. */
         task->isSocketReady = false;
     }
 
@@ -381,12 +403,14 @@ void WaitForEvent(List *taskList) {
     set = CreateWaitEventSet(oldResourceOwner, maxEvents);
     events = palloc0(sizeof(WaitEvent) * maxEvents);
 
+    /* Latch будит worker по SIGHUP/SIGTERM и другим PostgreSQL-событиям. */
     AddWaitEventToSet(set,
         WL_LATCH_SET,
         PGINVALID_SOCKET,
         MyLatch,
         NULL);
 
+    /* Postmaster death требует немедленного выхода background worker-а. */
     AddWaitEventToSet(set,
         WL_POSTMASTER_DEATH,
         PGINVALID_SOCKET,
@@ -420,6 +444,7 @@ void WaitForEvent(List *taskList) {
             continue;
         }
 
+        /* user_data хранит task, чтобы после wait понять, чей socket готов. */
         AddWaitEventToSet(set,waitEvents, socket, NULL, task);
     }
 
@@ -444,6 +469,7 @@ void WaitForEvent(List *taskList) {
 }
 
 
+/* Продвигает все tasks на один шаг state machine. */
 void ManageCronTasks(List * tasks, TimestampTz currentTime) {
     ListCell * taskCell = NULL;
     foreach(taskCell, tasks) {
@@ -452,6 +478,7 @@ void ManageCronTasks(List * tasks, TimestampTz currentTime) {
     }
 }
 
+/* State machine одного запуска: connect -> send -> running -> done/error. */
 void ManageCronTask(CronTask *task, TimestampTz currentTime) {
     CronJob *job = getCronJob(task->jobId);
     CronTaskState taskState = task->state;
@@ -463,6 +490,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
     PGresult * result = NULL;
     bool stopReadingResults = false;
 
+    /* Job могла быть удалена между итерациями; task должен завершиться штатно. */
     if (job == NULL && taskState != CRON_TASK_DONE) {
         task->state = CRON_TASK_ERROR;
         SetTaskError(task, "job metadata not found");
@@ -471,6 +499,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
     switch (taskState) {
         case CRON_TASK_WAITING: {
+            /* Неактивные tasks удаляются только когда уже не выполняют работу. */
             if (task->isActive == false) {
                 bool found = false;
                 hash_search(CronTaskHashTable, &key, HASH_REMOVE, &found);
@@ -488,9 +517,10 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             TimestampTz deadline = 0;
             char optionsString[64];
             char nodePortString[12];
-            snprintf(nodePortString, sizeof(nodePortString), "%d", job->nodePort); // для values
-            snprintf(optionsString, sizeof(optionsString), "-c statement_timeout=%d", StatementTimeoutMs); // для values
+            snprintf(nodePortString, sizeof(nodePortString), "%d", job->nodePort);
+            snprintf(optionsString, sizeof(optionsString), "-c statement_timeout=%d", StatementTimeoutMs);
 
+            /* libpq принимает параметры подключения как параллельные массивы key/value. */
             const char * keywords[] = {
                 "host",
                 "port",
@@ -543,6 +573,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             }
             deadline = TimestampTzPlusMilliseconds(currentTime,TaskTimeout);
             task->startDeadline = deadline;
+            /* PQconnectPoll сначала обычно хочет writable socket. */
             task->polling_status = PGRES_POLLING_WRITING;
             task->state = CRON_TASK_CONNECTING;
 
@@ -581,6 +612,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 break;
             }
 
+            /* Неблокирующее подключение требует повторять PQconnectPoll по socket events. */
             pollingStatus = PQconnectPoll(connection);
             if (pollingStatus == PGRES_POLLING_OK) {
                 int pid = PQbackendPID(connection);
@@ -603,8 +635,6 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
         }
         case CRON_TASK_SENDING: {
-            /* этап отправки данных в базу */
-
             char * command = job->command;
             int send_status = 0;
             if (!task->isActive) {
@@ -633,6 +663,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 break;
             }
 
+            /* PQsendQuery только отправляет запрос; результаты читаются в RUNNING. */
             send_status = PQsendQuery(connection, command);
             if (send_status == 1) {
                 elog(LOG, "my_nedo_cron: query sent for job %ld", key);
@@ -657,7 +688,6 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
         }
         case CRON_TASK_RUNNING: {
-            /* задание выполняется */
             if (!task->isActive) {
                 task->state= CRON_TASK_ERROR;
                 task->polling_status = 0;
@@ -678,6 +708,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 PGcancel *cancel;
                 char errbuf[256];
 
+                /* Timeout сначала отправляет cancel, затем мы дочитываем server error. */
                 cancel = PQgetCancel(connection);
                 elog(LOG,
        "my_nedo_cron: runtime timeout reached for job " INT64_FORMAT,
@@ -732,6 +763,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 break;
             }
 
+            /* У multi-statement query может быть несколько PGresult подряд. */
             while ((result = PQgetResult(connection)) != NULL) {
                 ExecStatusType exec_status = PQresultStatus(result);
                 switch (exec_status) {
@@ -745,7 +777,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                     case PGRES_FATAL_ERROR:
                     case PGRES_NONFATAL_ERROR: {
                         const char * sqlState = PQresultErrorField(result, PG_DIAG_SQLSTATE);
-                        // 57014 - timeout
+                        /* SQLSTATE 57014 означает cancel/statement_timeout. */
                         if (sqlState != NULL && strcmp(sqlState, "57014") == 0) {
                             SetTaskError(task,PQresultErrorMessage(result));
                             task->timedOut = true;
@@ -763,6 +795,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                     case PGRES_COPY_BOTH:
                     case PGRES_COPY_IN:
                     case PGRES_COPY_OUT: {
+                        /* COPY меняет протокол обмена; scheduler его явно не поддерживает. */
                         SetTaskError(task,"COPY not supported");
                         task->polling_status = 0;
                         task->state = CRON_TASK_ERROR;
@@ -777,6 +810,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 }
                 PQclear(result);
                 if (stopReadingResults) {
+                    /* После первой фатальной ошибки дальнейшие results не нужны. */
                     break;
                 }
 
@@ -800,6 +834,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
         case CRON_TASK_ERROR: {
 
             if (task->runId !=0 ) {
+                /* timedOut влияет только на статус в истории, errorMessage хранит текст. */
                 UpdateRunDetailsFinish(task->runId,
                     task->timedOut ? "timeout" : "failed",
                     task->errorMessage,
@@ -833,6 +868,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
         case CRON_TASK_DONE:
         default: {
+            /* Очередь одной job ограничена, чтобы долгие задачи не копили память бесконечно. */
             if (task->pendingRunCount > maxPendingTasks) {
                 task->pendingRunCount = maxPendingTasks;
             }
@@ -847,6 +883,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 }
 
 
+/* Проверяет минутное расписание одной task и добавляет due runs в очередь. */
 void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz lastMinute, TimestampTz currentTime) {
 
     TimestampTz currentMinute = StartOfMinute(currentTime);
@@ -858,6 +895,7 @@ void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz last
 
     switch (clock_status) {
         case CLOCK_PROGRESSED: {
+            /* Нормальный ход времени: проверяем каждую пропущенную минуту. */
             while (virtTime < currentMinute) {
                 virtTime = TimestampTzPlusMilliseconds(virtTime, 60*1000);
 
@@ -869,6 +907,7 @@ void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz last
             break;
         }
         case CLOCK_JUMP_FORWARD: {
+            /* При скачке вперед floating schedules обрабатываются аккуратно, без дублей. */
             while (virtTime < currentMinute) {
                 virtTime = TimestampTzPlusMilliseconds(virtTime, 60*1000);
 
@@ -888,6 +927,7 @@ void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz last
 
 
         case CLOCK_JUMP_BACKWARD: {
+            /* При откате назад не переигрываем прошлые минуты, проверяем только текущую. */
             if (ShouldRunTask(schedule, currentMinute, true, false )) {
                 task->pendingRunCount++;
                 elog(LOG, "my_nedo_cron: job %ld is due", task->jobId);
@@ -907,6 +947,7 @@ void StartPendingTask(CronTask* task, ClockStatus clock_status, TimestampTz last
     }
 }
 
+/* Находит due jobs для текущей итерации worker-а. */
 void StartPendingTasks(List * taskList, TimestampTz currentTime) {
     static TimestampTz lastMinute = 0;
     int minutesPassed = 0;
@@ -921,6 +962,7 @@ void StartPendingTasks(List * taskList, TimestampTz currentTime) {
 
     //if (minutesPassed == 0) return ;
 
+    /* Большие скачки времени считаются сменой часов: старые минуты не догоняем. */
     if (minutesPassed > 3 * 60) {
         clock_status = CLOCK_CHANGE;
     }
@@ -961,6 +1003,7 @@ void StartPendingTasks(List * taskList, TimestampTz currentTime) {
 }
 
 
+/* Проверяет, соответствует ли конкретная минута cron-битсетам schedule. */
 static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool floatingHourOrMinute,
               bool fixedHourOrMinute) {
     time_t currentTime_t = timestamptz_to_time_t(currentTime);
@@ -981,6 +1024,10 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
     bool dayOfMonthMatches = schedule->dayOfMonth[dayOfMonth] || (schedule->LAST_DOM && isLastDOM);
     bool dayOfWeekMatches = schedule->dayOfWeek[dayOfWeek];
 
+    /*
+     * Cron semantics: если DOM или DOW задан звездочкой, оба поля должны совпасть.
+     * Если оба поля конкретные, достаточно совпадения одного из них.
+     */
     if (schedule->DOM_STAR || schedule->DOW_STAR) {
         dayOfMonthAndDayOfWeek = dayOfMonthMatches && dayOfWeekMatches;
     }
@@ -992,6 +1039,7 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
     if (schedule->minute[minute] && schedule->hour[hour] && schedule->month[month]
     && dayOfMonthAndDayOfWeek) {
         bool isFloating = schedule->MIN_STAR || schedule->HOUR_STAR;
+        /* Флаги нужны для корректной обработки скачков системного времени. */
         if ((fixedHourOrMinute && !isFloating) ||
             (floatingHourOrMinute && isFloating)) {
             return true;
@@ -1000,4 +1048,3 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
 
     return false;
 }
-

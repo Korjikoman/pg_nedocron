@@ -39,6 +39,7 @@ static char *nodename = "localhost";
 
 static void invalidate_job_cache_internal(void);
 
+/* Преобразует строку nedo_cron.jobs в CronJob и кладет ее в job hash table. */
 CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     bool isNull = false;
     bool found = false;
@@ -63,6 +64,7 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
     scheduleText = TextDatumGetCString(schedule_text);
 
 
+    /* Расписание парсится при загрузке, чтобы worker не держал битые jobs в памяти. */
     schedule = parse_with_error(scheduleText, &parse_error);
 
     if (schedule == NULL)
@@ -94,6 +96,7 @@ CronJob * TupleToJob(TupleDesc desc, HeapTuple heap_tuple) {
 
 }
 
+/* Ищет загруженную job в локальном hash table worker-а. */
 CronJob * getCronJob(int64 jobId) {
     CronJob * job = NULL;
     int64 hashKey = jobId;
@@ -105,7 +108,7 @@ CronJob * getCronJob(int64 jobId) {
 }
 
 
-
+/* Полностью перечитывает nedo_cron.jobs и синхронизирует active-флаги tasks. */
 void ReloadCronJobs(void) {
     List * jobsList = NULL;
     ListCell * jobCell = NULL;
@@ -114,11 +117,13 @@ void ReloadCronJobs(void) {
     int jobCount = 0;
 
 
+    /* Все строки jobs живут в отдельном context, поэтому reload можно сделать reset-ом. */
     MemoryContextReset(CronJobContext);
     CronJobHashTable = CreateCronJobHashTable();
 
     hash_seq_init(&status, CronTaskHashTable);
 
+    /* После reload старые tasks сначала считаются удаленными, потом активные включаются назад. */
     while ((task = (CronTask *)hash_seq_search(&status)) != NULL) {
         task->isActive = false;
     }
@@ -139,6 +144,7 @@ void ReloadCronJobs(void) {
 
 }
 
+/* Создает hash table для загруженных CronJob. */
 HTAB * CreateCronJobHashTable() {
     HTAB *jobHashTable = NULL;
     HASHCTL hashctl;
@@ -156,6 +162,7 @@ HTAB * CreateCronJobHashTable() {
 }
 
 
+/* Открывает короткую transaction + SPI-сессию для SQL из background worker-а. */
 void StartTransaction(void) {
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
@@ -164,6 +171,7 @@ void StartTransaction(void) {
 
 }
 
+/* Закрывает SPI-сессию и коммитит короткую transaction worker-а. */
 void EndTransaction(void) {
     SPI_finish();
     PopActiveSnapshot();
@@ -171,7 +179,7 @@ void EndTransaction(void) {
 }
 
 
-
+/* Читает все jobs из metadata-таблицы внутри server-side transaction. */
 List * LoadJobsList() {
     List * jobs = NULL;
     Relation jobs_table = NULL;
@@ -183,6 +191,7 @@ List * LoadJobsList() {
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
     PushActiveSnapshot(GetTransactionSnapshot());
+    /* На recovery или до CREATE EXTENSION metadata-таблицу читать нельзя. */
     if (RecoveryInProgress() || !CronLoaded()) {
         PopActiveSnapshot();
         CommitTransactionCommand();
@@ -200,6 +209,7 @@ List * LoadJobsList() {
         MemoryContext oldContext = NULL;
         CronJob * job = NULL;
 
+        /* Job-структуры должны пережить loop context до следующего reload. */
         oldContext = MemoryContextSwitchTo(CronJobContext);
         job = TupleToJob(tuple_desc, heap_tuple);
 
@@ -222,6 +232,7 @@ List * LoadJobsList() {
 
 }
 
+/* Проверяет, что extension уже создан и сейчас не идет CREATE EXTENSION. */
 bool CronLoaded() {
     Oid extensionOid = get_extension_oid(EXTENSION_NAME, true);
     if (extensionOid != InvalidOid) {
@@ -233,6 +244,7 @@ bool CronLoaded() {
     return false;
 }
 
+/* Возвращает OID nedo_cron.jobs и кэширует его в процессе worker-а. */
 Oid CronJobRelationId(void) {
     if (CachedCronJobRealtionId == InvalidOid) {
         Oid schema_id = get_namespace_oid(CRON_SCHEMA_NAME, false);
@@ -242,6 +254,7 @@ Oid CronJobRelationId(void) {
     return CachedCronJobRealtionId;
 }
 
+/* SQL-функция nedo_cron.check_schedule(text). */
 Datum check_schedule(PG_FUNCTION_ARGS) {
     CronSchedule * schedule = NULL;
     text * scheduleText = PG_GETARG_TEXT_P(0);
@@ -254,6 +267,7 @@ Datum check_schedule(PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(true);
 }
 
+/* SQL-функция nedo_cron.schedule(text,text): валидирует schedule и вставляет job. */
 Datum schedule_job(PG_FUNCTION_ARGS) {
     text *scheduleText = PG_GETARG_TEXT_P(0);
     text *queryText = PG_GETARG_TEXT_P(1);
@@ -263,6 +277,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     CronSchedule *schedule = NULL;
     Oid userId = GetUserId();
     char* username = GetUserNameFromId(userId, false);
+    /* Парсим до INSERT, чтобы вернуть пользователю точную ошибку поля/token-а. */
     schedule = parse_with_error(scheduleChar, &parseError);
     char * databaseName = get_database_name(MyDatabaseId);
     int ret;
@@ -303,6 +318,10 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
         ereport(ERROR, (errmsg("could not connect to SPI")));
     }
 
+    /*
+     * INSERT делаем через SPI, а не через heap API, чтобы сработали CHECK,
+     * defaults, triggers и relcache invalidation.
+     */
     ret = SPI_execute_with_args(
         "INSERT INTO nedo_cron.jobs(schedule, command, nodename, nodeport, database, username) "
         "VALUES ($1, $2, $3, $4, $5, $6) "
@@ -333,6 +352,7 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     PG_RETURN_INT64(jobId);
 }
 
+/* SQL-функция nedo_cron.unschedule(bigint): удаляет job через SQL DELETE. */
 Datum unschedule_job(PG_FUNCTION_ARGS) {
 
     int64 jobId = PG_GETARG_INT64(0);
@@ -346,6 +366,7 @@ Datum unschedule_job(PG_FUNCTION_ARGS) {
         ereport(ERROR, (errmsg("could not connect to SPI")));
     }
 
+    /* DELETE через SPI сохраняет ON DELETE CASCADE для job_run_details. */
     ret = SPI_execute_with_args(
         "DELETE FROM nedo_cron.jobs WHERE jobid = $1 RETURNING jobid",
         1,
@@ -370,6 +391,7 @@ Datum unschedule_job(PG_FUNCTION_ARGS) {
     PG_RETURN_BOOL(true);
 }
 
+/* Trigger function: просит PostgreSQL разослать relcache invalidation по jobs. */
 Datum invalidate_job_cache(PG_FUNCTION_ARGS) {
     if (!CALLED_AS_TRIGGER(fcinfo)) {
         elog(ERROR, "invalidate_job_cache must be called as a trigger");
@@ -380,6 +402,7 @@ Datum invalidate_job_cache(PG_FUNCTION_ARGS) {
     PG_RETURN_POINTER(NULL);
 }
 
+/* Инвалидирует relcache tuple nedo_cron.jobs для других процессов, включая worker. */
 static void invalidate_job_cache_internal(void) {
     HeapTuple tuple = NULL;
 

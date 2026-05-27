@@ -1,5 +1,6 @@
 #include "../include/cron_time.h"
 
+/* Округляет timestamp вниз до начала текущей минуты. */
 TimestampTz StartOfMinute(TimestampTz time) {
     TimestampTz result = 0;
 
@@ -13,6 +14,7 @@ TimestampTz StartOfMinute(TimestampTz time) {
 }
 
 
+/* Возвращает timestamp начала следующей минуты. */
 TimestampTz EndOfMinute(TimestampTz time) {
     TimestampTz result = StartOfMinute(time);
 
@@ -25,9 +27,10 @@ TimestampTz EndOfMinute(TimestampTz time) {
     return result;
 }
 
+/* Считает, сколько полных минут прошло между двумя timestamp. */
 int MinutesPassed(TimestampTz start, TimestampTz end) {
     long secs = 0;
-    int microsecs = 0; // :^)
+    int microsecs = 0;
     TimestampDifference(start, end, &secs, &microsecs);
     return (int) secs / 60;
 }

@@ -14,21 +14,7 @@
 #include <utils/rel.h>
 #include <utils/timestamp.h>
 
-/*
-Как чинить C-код:
-
-4. В `CRON_TASK_RUNNING`, когда все `PQgetResult()` успешно обработаны,
-   обновить строку в `results`: `status = 'succeeded'`, `end_time = now`,
-   `return_message = 'OK'` или command tag.
-5. В `CRON_TASK_ERROR` обновить строку: `status = 'failed'`,
-   `return_message = task->errorMessage`.
-6. При timeout писать `status = 'timeout'`.
-7. Текущий `RunCounter` как источник `runId` убрать или оставить только для
-   временной отладки. Run id должен приходить из таблицы.
-*/
-
-
-
+/* Создает строку истории запуска и возвращает run_id из sequence таблицы. */
 int64 InsertRunDetailsStart(CronTask *task, CronJob *job, TimestampTz startTime) {
    int ret;
    Oid argTypes[4] = {INT8OID, TEXTOID, TEXTOID, TIMESTAMPTZOID};
@@ -55,6 +41,7 @@ int64 InsertRunDetailsStart(CronTask *task, CronJob *job, TimestampTz startTime)
       false,
       0);
 
+   /* INSERT идет через SPI, чтобы работали constraints и обычная SQL-семантика. */
    if (ret != SPI_OK_INSERT_RETURNING || SPI_processed != 1) {
       EndTransaction();
       ereport(ERROR, (errmsg("could not insert row into nedo_cron.job_run_details")));
@@ -75,6 +62,7 @@ int64 InsertRunDetailsStart(CronTask *task, CronJob *job, TimestampTz startTime)
    return runId;
 }
 
+/* Переводит run details в running и сохраняет PID backend-а, выполняющего job. */
 void UpdatePID(int64 runId, int pid) {
    int ret;
 
@@ -101,6 +89,7 @@ void UpdatePID(int64 runId, int pid) {
    if (ret != SPI_OK_UPDATE) {
       ereport(ERROR, (errmsg("could not update pid in job_run_details row with runId=%ld", runId)));
    }
+   /* Строка могла исчезнуть из-за unschedule -> ON DELETE CASCADE. */
    if (SPI_processed == 0) {
       elog(WARNING, "job_run_details row with runId=%ld disappeared before pid update", runId);
       EndTransaction();
@@ -114,6 +103,7 @@ void UpdatePID(int64 runId, int pid) {
    EndTransaction();
 }
 
+/* Завершает строку истории финальным status, сообщением и end_time. */
 void UpdateRunDetailsFinish(int64 runId, const char *status, const char *message, TimestampTz endTime) {
    int ret;
    Oid argTypes[4] = {TEXTOID, TEXTOID, TIMESTAMPTZOID, INT8OID};
@@ -142,6 +132,7 @@ void UpdateRunDetailsFinish(int64 runId, const char *status, const char *message
    if (ret != SPI_OK_UPDATE) {
       ereport(ERROR, (errmsg("could not update job_run_details row with runId=%ld", runId)));
    }
+   /* Для удаленной job run details может уже быть каскадно удален. */
    if (SPI_processed == 0) {
       elog(WARNING, "job_run_details row with runId=%ld disappeared before finish update", runId);
       EndTransaction();

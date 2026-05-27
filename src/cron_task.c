@@ -4,6 +4,7 @@
 
 #include "cron_job.h"
 
+/* Инициализирует runtime-состояние job в task hash table. */
 void InitCronTask(CronTask *task, int64 jobId) {
     task->runId = 0;
     task->jobId = jobId;
@@ -19,6 +20,7 @@ void InitCronTask(CronTask *task, int64 jobId) {
     task->timedOut = false;
 }
 
+/* Сбрасывает состояние task после завершения одного запуска. */
 void ResetCronTaskAfterRun(CronTask *task) {
     task->runId = 0;
     task->state = CRON_TASK_WAITING;
@@ -32,6 +34,7 @@ void ResetCronTaskAfterRun(CronTask *task) {
     task->timedOut = false;
 }
 
+/* Планирует следующий запуск для расписания вида "N seconds". */
 void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime) {
     CronJob * job = getCronJob(task->jobId);
     CronSchedule* schedule = &job->schedule;
@@ -41,6 +44,7 @@ void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime) {
         task->nextRunTime = TimestampTzPlusMilliseconds(currentTime, intervalMs);
     }
 
+    /* pendingRunCount ограничивает запуск одной job одним активным экземпляром. */
     if (TimestampDifferenceExceeds(task->nextRunTime, currentTime, 0)) {
         if (task->pendingRunCount == 0 ) {
             task->pendingRunCount ++;
@@ -51,6 +55,7 @@ void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime) {
     }
 }
 
+/* Возвращает существующий task или создает новый для jobId. */
 CronTask * getCronTask(int64 jobId) {
     CronTask * task;
     int64 jobKey = 0;
@@ -65,6 +70,7 @@ CronTask * getCronTask(int64 jobId) {
     return task;
 }
 
+/* Создает hash table runtime-состояний jobs. */
 HTAB * CreateCronTaskHashTable() {
     HTAB *taskHashTable = NULL;
     HASHCTL hashctl;
