@@ -17,6 +17,11 @@
 #include "utils/memutils.h"
 #include "signal.h"
 #include <poll.h>
+#include <access/xact.h>
+#include <catalog/namespace.h>
+#include <utils/snapmgr.h>
+#include <utils/wait_event.h>
+
 #include "utils/backend_status.h"
 #include "catalog/indexing.h"
 #include "cron_task.h"
@@ -28,7 +33,7 @@
 #include "utils/hsearch.h"
 #include "mb/pg_wchar.h"
 #include "utils/guc.h"
-
+#include "storage/latch.h"
 
 static const int MaxSleep = 1000; // ms
 
@@ -46,6 +51,10 @@ static char *extension_name = "nedo_cron";
 int TaskTimeout = 10000; // 10sec
 int maxPendingTasks = 20;
 int StatementTimeoutMs = 10000;
+static bool CronJobRelcacheCallbackRegistered = false;
+static Oid CronJobRelcacheOid = InvalidOid;
+
+
 
 PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(schedule_job);
@@ -61,6 +70,56 @@ List * LoadTasksList();
 static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool floatingHourOrMinute,bool fixedHourOrMinute) ;
 void StartPendingTasks(List * taskList, TimestampTz currentTime);
 void ManageCronTasks(List * tasks, TimestampTz currentTime);
+
+static bool TaskNeedsSocketWait(CronTask * task);
+static uint32 TaskWaitEvents(CronTask * task);
+static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime);
+
+static void CronJobRelcacheCallback(Datum arg, Oid relid);
+static void RegisterCronJobRelcacheCallbackIfNeeded(void);
+
+
+
+static void CronJobRelcacheCallback(Datum arg, Oid relid) {
+    Oid jobsRelid = DatumGetObjectId(arg);
+    if (relid == InvalidOid || relid == jobsRelid) {
+        elog(LOG, "my_nedo_cron: jobs relcache invalidation received");
+        CronJobCacheValid = false;
+    }
+}
+
+static void RegisterCronJobRelcacheCallbackIfNeeded(void) {
+    Oid schemaId = InvalidOid;
+    Oid jobsRelid = InvalidOid;
+
+    if (CronJobRelcacheCallbackRegistered) {
+        return;
+    }
+
+    SetCurrentStatementStartTimestamp();
+    StartTransactionCommand();
+    PushActiveSnapshot(GetTransactionSnapshot());
+
+    if (CronLoaded()) {
+        schemaId = get_namespace_oid(CRON_SCHEMA_NAME, true);
+        if (OidIsValid(schemaId)) {
+            jobsRelid = get_relname_relid(JOBS_TABLE_NAME, schemaId);
+        }
+    }
+    PopActiveSnapshot();
+    CommitTransactionCommand();
+
+    if (!OidIsValid(jobsRelid)) {
+        return;
+    }
+
+    CronJobRelcacheOid = jobsRelid;
+    
+    CacheRegisterRelcacheCallback(CronJobRelcacheCallback, ObjectIdGetDatum(CronJobRelcacheOid));
+    elog(LOG, "my_nedo_cron: registered jobs relcache callback, relid=%u",
+       CronJobRelcacheOid);
+    CronJobRelcacheCallbackRegistered = true;
+}
 
 void _PG_init() {
     BackgroundWorker worker;
@@ -187,9 +246,16 @@ void PgOctopusWorkerMain(Datum arg) {
         TimestampTz currentTime = GetCurrentTimestamp();
 
         AcceptInvalidationMessages();
+        RegisterCronJobRelcacheCallbackIfNeeded();
+
+        if (sighupFlag) {
+            sighupFlag = false;
+            ProcessConfigFile(PGC_SIGHUP);
+            CronJobCacheValid = false;
+        }
 
         if (!CronJobCacheValid || lastJobReloadTime == 0 ||
-            TimestampDifferenceExceeds(lastJobReloadTime, currentTime, 5000)) {
+            TimestampDifferenceExceeds(lastJobReloadTime, currentTime, 60000)) {
             ReloadCronJobs();
             lastJobReloadTime = currentTime;
         }
@@ -200,6 +266,8 @@ void PgOctopusWorkerMain(Datum arg) {
 
 
         WaitForEvent(cronTasks);
+
+        currentTime = GetCurrentTimestamp();
         ManageCronTasks(cronTasks, currentTime);
 
         MemoryContextReset(loop_memory_context);
@@ -224,126 +292,155 @@ List * LoadTasksList() {
     return tasks;
 }
 
+static bool TaskNeedsSocketWait(CronTask * task) {
+    return task->state == CRON_TASK_CONNECTING ||
+           task->state == CRON_TASK_SENDING ||
+           task->state == CRON_TASK_RUNNING;
+}
 
+static uint32 TaskWaitEvents(CronTask * task) {
+    if (task->polling_status == PGRES_POLLING_READING) {
+        return WL_SOCKET_READABLE;
+    }
+    if (task->polling_status == PGRES_POLLING_WRITING) {
+        return WL_SOCKET_WRITEABLE;
+    }
+    return 0;
+}
 
-void WaitForEvent(List *taskList) {
-    int socket =0;
-    int listLength = list_length(taskList);
+static int CalculateWaitTimeout(List * taskList, TimestampTz currentTime) {
+    TimestampTz nextEventTime;
+    ListCell * taskCell = NULL;
     long waitSecs = 0;
     int waitMs = 0;
+    int timeoutMs = 0;
 
-    if (listLength > 0) {
-        TimestampTz currentTime = 0;
-        TimestampTz nextEventTime = 0;
-        struct pollfd *pollFDs = NULL;
-        ListCell * taskCell = NULL;
+    nextEventTime = EndOfMinute(currentTime);
+    foreach(taskCell, taskList) {
+        CronTask * task = (CronTask *) lfirst(taskCell);
+        CronJob * job = getCronJob(task->jobId);
 
-        pollFDs = (struct pollfd *) palloc0(listLength * sizeof(struct pollfd));
-        int taskIndex = 0;
-        currentTime = GetCurrentTimestamp();
-        nextEventTime = EndOfMinute(currentTime);
-        foreach(taskCell, taskList) {
-            CronTask * task = (CronTask *) lfirst(taskCell);
-            PostgresPollingStatusType polling_status = task->polling_status;
-            struct pollfd * poll_file_descriptor = &pollFDs[taskIndex];
-
-            if (task->state == CRON_TASK_WAITING && task->pendingRunCount > 0) {
-                pfree(pollFDs);
-                return;
-            }
-
-            if (task->state == CRON_TASK_CONNECTING || task->state == CRON_TASK_SENDING) {
-                if (TimestampDifferenceExceeds(task->startDeadline, nextEventTime, 0)) {
-                    nextEventTime = task->startDeadline;
-                }
-            }
-
-            if (task->state == CRON_TASK_RUNNING || task->runDeadline !=0) {
-                if (TimestampDifferenceExceeds(task->runDeadline, nextEventTime, 0)) {
-                    nextEventTime = task->runDeadline;
-                }
-            }
-
-            if (task->state == CRON_TASK_CONNECTING || task->state == CRON_TASK_SENDING
-                || task->state == CRON_TASK_RUNNING) {
-                int pollEventFlag = 0;
-                PGconn *connection = task->conn;
-
-                if (connection == NULL) {
-                    task->state = CRON_TASK_ERROR;
-                    task->polling_status = 0;
-                    SetTaskError(task,
-                                 "[my_nedo_cron] connection is NULL. job_id: " INT64_FORMAT,
-                                 task->jobId);
-
-                    poll_file_descriptor->fd = -1;
-                    poll_file_descriptor->events = 0;
-                    poll_file_descriptor->revents = 0;
-
-                    taskIndex++;
-                    continue;
-                }
-
-                if (task->state == CRON_TASK_SENDING ||
-                    polling_status == PGRES_POLLING_WRITING) {
-                    pollEventFlag = POLLERR | POLLOUT;
-                }
-                else if (polling_status == PGRES_POLLING_READING) {
-                    pollEventFlag = POLLERR | POLLIN;
-                }
-                socket = PQsocket(connection);
-                if (socket < 0) {
-                    task->state=CRON_TASK_ERROR;
-                    SetTaskError(task, "[my_nedo_cron] connection with server is not open, socket < 0."
-                                       "job_id: %ld", task->jobId);
-                    poll_file_descriptor->fd = -1;
-                    poll_file_descriptor->events = 0;
-                    poll_file_descriptor->revents= 0;
-                    taskIndex++;
-                    continue;
-                }
-                poll_file_descriptor->fd = socket;
-                poll_file_descriptor->events = pollEventFlag;
-            }
-            else {
-                poll_file_descriptor->fd = -1;
-                poll_file_descriptor->events = 0;
-            }
-
-            poll_file_descriptor->revents= 0;
-            taskIndex++;
-
-
+        if (task->state == CRON_TASK_WAITING && task->pendingRunCount > 0) {
+            return 0;
         }
 
-        TimestampDifference(currentTime, nextEventTime, &waitSecs, &waitMs);
-
-        int pollTimeoutMs = (int) waitSecs * 1000 + waitMs / 1000;
-
-        if (pollTimeoutMs > MaxSleep) {
-            pollTimeoutMs = MaxSleep;
+        if (job != NULL && job->schedule.SECONDS && task->nextRunTime != 0) {
+            if (TimestampDifferenceExceeds(task->nextRunTime, nextEventTime, 0)) {
+                nextEventTime = task->nextRunTime;
+            }
         }
 
-        int pollRes = poll(pollFDs, listLength, pollTimeoutMs);
-        if (pollRes < 0) {
-            pfree(pollFDs);
-            return;
+        if ( (task->state == CRON_TASK_CONNECTING || task->state == CRON_TASK_SENDING)
+            && task->startDeadline != 0) {
+            if (TimestampDifferenceExceeds(task->startDeadline, nextEventTime, 0)) {
+                nextEventTime = task->startDeadline;
+            }
         }
 
-        taskIndex = 0;
-        foreach(taskCell, taskList) {
-            CronTask * task = (CronTask *) lfirst(taskCell);
-            struct pollfd * pollfd = &pollFDs[taskIndex];
-            task->isSocketReady = pollfd->events && pollfd->revents;
-
-            taskIndex++;
+        if (task->state == CRON_TASK_RUNNING && task->runDeadline != 0 && !task->cancelRequested) {
+            if (TimestampDifferenceExceeds(task->runDeadline, nextEventTime, 0)) {
+                nextEventTime = task->runDeadline;
+            }
         }
-        pfree(pollFDs);
-    }
-    else {
-        pg_usleep(MaxSleep * 1000L); // 1sec
+
     }
 
+    TimestampDifference(currentTime, nextEventTime, &waitSecs, &waitMs);
+
+    timeoutMs = (int) waitSecs * 1000 + waitMs / 1000;
+    if (timeoutMs < 0) {
+        timeoutMs = 0;
+    }
+    if (timeoutMs > MaxSleep) {
+        timeoutMs = MaxSleep;
+    }
+    return timeoutMs;
+}
+
+void WaitForEvent(List *taskList) {
+    WaitEventSet * set = NULL;
+    WaitEvent *events = NULL;
+    TimestampTz currentTime;
+    ListCell * taskCell = NULL;
+    int timeoutMs = 0;
+    int maxEvents = 0;
+    int eventCount;
+    currentTime = GetCurrentTimestamp();
+
+    foreach(taskCell, taskList) {
+        CronTask * task = (CronTask *) lfirst(taskCell);
+        task->isSocketReady = false;
+    }
+
+    timeoutMs = CalculateWaitTimeout(taskList, currentTime);
+    if (timeoutMs ==0) return;
+
+    maxEvents = list_length(taskList) + 2;
+    ResourceOwner oldResourceOwner = CurrentResourceOwner;
+
+    set = CreateWaitEventSet(oldResourceOwner, maxEvents);
+    events = palloc0(sizeof(WaitEvent) * maxEvents);
+
+    AddWaitEventToSet(set,
+        WL_LATCH_SET,
+        PGINVALID_SOCKET,
+        MyLatch,
+        NULL);
+
+    AddWaitEventToSet(set,
+        WL_POSTMASTER_DEATH,
+        PGINVALID_SOCKET,
+        NULL,
+        NULL);
+
+    foreach(taskCell, taskList) {
+        CronTask * task = (CronTask*) lfirst(taskCell);
+        uint32 waitEvents;
+        int socket;
+
+        if (!TaskNeedsSocketWait(task)) continue;
+        waitEvents = TaskWaitEvents(task);
+
+        if (waitEvents == 0) continue;
+
+        if (task->conn == NULL) {
+            task->state = CRON_TASK_ERROR;
+            task->polling_status = 0;
+            SetTaskError(task,
+                "[my_nedo_cron] connection is NULL, job_id: %ld", task->jobId );
+            continue;
+        }
+
+        socket = PQsocket(task->conn);
+        if (socket < 0) {
+            task->state = CRON_TASK_ERROR;
+            task->polling_status = PGRES_POLLING_READING;
+            SetTaskError(task,
+                "[my_nedo_cron] connection socket < 0, job_id: %ld", task->jobId );
+            continue;
+        }
+
+        AddWaitEventToSet(set,waitEvents, socket, NULL, task);
+    }
+
+    eventCount = WaitEventSetWait(set, timeoutMs, events, maxEvents, PG_WAIT_EXTENSION);
+    for (int i = 0; i < eventCount; i++) {
+        if (events[i].events & WL_LATCH_SET) {
+            ResetLatch(MyLatch);
+            continue;
+        }
+
+        if (events[i].events & WL_POSTMASTER_DEATH) {
+            proc_exit(1);
+        }
+        if (events[i].user_data != NULL) {
+            CronTask * task = (CronTask*)events[i].user_data;
+            task->isSocketReady=true;
+        }
+    }
+    pfree(events);
+    FreeWaitEventSet(set);
+    CHECK_FOR_INTERRUPTS();
 }
 
 
@@ -376,6 +473,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             if (task->isActive == false) {
                 bool found = false;
                 hash_search(CronTaskHashTable, &key, HASH_REMOVE, &found);
+                break;
             }
 
             if (task->pendingRunCount == 0) break;
@@ -390,7 +488,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
             char optionsString[64];
             char nodePortString[12];
             snprintf(nodePortString, sizeof(nodePortString), "%d", job->nodePort); // для values
-            snprintf(optionsString, sizeof(optionsString), "-c statement_timeout=%d", job->nodePort); // для values
+            snprintf(optionsString, sizeof(optionsString), "-c statement_timeout=%d", StatementTimeoutMs); // для values
 
             const char * keywords[] = {
                 "host",
@@ -541,6 +639,10 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 task->state = CRON_TASK_RUNNING;
                 task->startDeadline = 0;
                 task->runDeadline = TimestampTzPlusMilliseconds(currentTime, StatementTimeoutMs);
+                elog(LOG,
+                   "my_nedo_cron: job " INT64_FORMAT " runDeadline set, statement_timeout_ms=%d",
+                   task->jobId,
+                   StatementTimeoutMs);
                 task->cancelRequested = false;
                 task->timedOut = false;
             }
@@ -576,15 +678,34 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 char errbuf[256];
 
                 cancel = PQgetCancel(connection);
-                if (cancel != NULL) {
-                    if (PQcancel(cancel,errbuf,sizeof(errbuf)) == 0) {
-                        SetTaskError(task,
-                            "could not cancel timed out job, job_id=" INT64_FORMAT " : %s",
-                            task->jobId,
-                            errbuf);
-                    }
-                    PQfreeCancel(cancel);
+                elog(LOG,
+       "my_nedo_cron: runtime timeout reached for job " INT64_FORMAT,
+       task->jobId);
+                if (cancel == NULL) {
+                    SetTaskError(task,
+      "could not cancel timed out job, job_id=" INT64_FORMAT ": PQgetCancel returned NULL",
+      task->jobId);
+                    task->timedOut = true;
+                    task->state = CRON_TASK_ERROR;
+                    task->polling_status = 0;
+                    break;
                 }
+                if ( PQcancel(cancel,errbuf,sizeof(errbuf)) == 0) {
+                    SetTaskError(task,
+                        "could not cancel timed out job, job_id=" INT64_FORMAT " : %s",
+                        task->jobId,
+                        errbuf);
+                    task->cancelRequested = true;
+                    task->timedOut = true;
+                    task->state = CRON_TASK_ERROR;
+                    task->runDeadline = 0;
+                    task->polling_status = 0;
+
+                    PQfreeCancel(cancel);
+
+                    break;
+                }
+                PQfreeCancel(cancel);
                 task->cancelRequested = true;
                 task->timedOut = true;
 
@@ -676,15 +797,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                     task->timedOut ? "timeout" : "failed",
                     task->errorMessage,
                     GetCurrentTimestamp());
-
-            }
-
-
-
-            if (!task->isActive) {
-                bool found = false;
-                hash_search(CronTaskHashTable, &key, HASH_REMOVE, &found);
-                break;
+                task->runId = 0;
             }
 
             if (task->errorMessage != NULL) {
@@ -695,10 +808,19 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 PQfinish(connection);
                 task->conn = NULL;
             }
-            task->state=CRON_TASK_DONE;
-            task->polling_status=0;
-            task->startDeadline=0;
-            task->isSocketReady=false;
+
+            if (!task->isActive) {
+                bool found = false;
+                hash_search(CronTaskHashTable, &key, HASH_REMOVE, &found);
+                break;
+            }
+            task->state = CRON_TASK_DONE;
+            task->polling_status = 0;
+            task->startDeadline = 0;
+            task->runDeadline = 0;
+            task->cancelRequested = false;
+            task->isSocketReady = false;
+
             break;
         }
 

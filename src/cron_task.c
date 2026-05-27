@@ -27,6 +27,9 @@ void ResetCronTaskAfterRun(CronTask *task) {
     task->conn = NULL;
     task->errorMessage = NULL;
     task->isSocketReady = false;
+    task->runDeadline = 0;
+    task->cancelRequested = false;
+    task->timedOut = false;
 }
 
 void StartSecondIntervalTask(CronTask* task, TimestampTz currentTime) {
