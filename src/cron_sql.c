@@ -30,57 +30,44 @@
 
 
 int64 InsertRunDetailsStart(CronTask *task, CronJob *job, TimestampTz startTime) {
-   Datum resultIdSequenceName = 0;
-   Relation job_run_details_table = NULL;
-   Datum values[JOB_RUN_DETAILS_COLS];
-   bool isNulls[JOB_RUN_DETAILS_COLS];
-   Datum runIdDatum = 0;
+   int ret;
+   Oid argTypes[4] = {INT8OID, TEXTOID, TEXTOID, TIMESTAMPTZOID};
+   Datum argValues[4];
+   char nulls[4] = {' ', ' ', ' ', ' '};
+   bool isNull = false;
    int64 runId = 0;
-   Oid schemaOid = InvalidOid;
-   Oid relationOid = InvalidOid;
-   TupleDesc tuple_desc = NULL;
-   HeapTuple heap_tuple = NULL;
 
    StartTransaction();
 
+   argValues[0] = Int64GetDatum(job->jobId);
+   argValues[1] = CStringGetTextDatum(job->database);
+   argValues[2] = CStringGetTextDatum(job->userName);
+   argValues[3] = TimestampTzGetDatum(startTime);
 
-   resultIdSequenceName = CStringGetTextDatum(JOB_RESULT_ID_SEQUENCE_NAME);
-   runIdDatum = DirectFunctionCall1(nextval, resultIdSequenceName);
-   runId = DatumGetInt64(runIdDatum);
-   memset(values, 0 , sizeof(values));
-   memset(isNulls, false, sizeof(isNulls));
+   ret = SPI_execute_with_args(
+      "INSERT INTO nedo_cron.job_run_details(jobid, database, username, status, start_time) "
+      "VALUES ($1, $2, $3, 'starting', $4) "
+      "RETURNING run_id",
+      4,
+      argTypes,
+      argValues,
+      nulls,
+      false,
+      0);
 
-   values[JOB_RUN_DETAILS_RUN_ID] = runIdDatum;
-   values[JOB_RUN_DETAILS_JOB_ID] = Int64GetDatum(job->jobId);
-
-   isNulls[JOB_RUN_DETAILS_JOB_PID] = true;
-
-   values[JOB_RUN_DETAILS_DATABASE] = CStringGetTextDatum(job->database);
-   values[JOB_RUN_DETAILS_USERNAME] = CStringGetTextDatum(job->userName);
-   values[JOB_RUN_DETAILS_STATUS] = CStringGetTextDatum("starting");
-
-   isNulls[JOB_RUN_DETAILS_RETURN_MESSAGE] = true;
-   values[JOB_RUN_DETAILS_START_TIME] = TimestampTzGetDatum(startTime);
-
-   isNulls[JOB_RUN_DETAILS_END_TIME]=true;
-
-   schemaOid = get_namespace_oid(CRON_SCHEMA_NAME, false);
-   relationOid = get_relname_relid(JOB_RUN_DETAILS_TABLE_NAME, schemaOid);
-
-   if (!OidIsValid(relationOid)) {
-      ereport(ERROR, (errmsg("could not find nedo_cron.job_run_details")));
+   if (ret != SPI_OK_INSERT_RETURNING || SPI_processed != 1) {
+      EndTransaction();
+      ereport(ERROR, (errmsg("could not insert row into nedo_cron.job_run_details")));
    }
 
-   job_run_details_table = table_open(relationOid, RowExclusiveLock);
-   tuple_desc = RelationGetDescr(job_run_details_table);
-
-   heap_tuple = heap_form_tuple(tuple_desc, values, isNulls);
-
-   CatalogTupleInsert(job_run_details_table, heap_tuple);
-   CommandCounterIncrement();
-
-   heap_freetuple(heap_tuple);
-   table_close(job_run_details_table, RowExclusiveLock);
+   runId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+                                       SPI_tuptable->tupdesc,
+                                       1,
+                                       &isNull));
+   if (isNull) {
+      EndTransaction();
+      ereport(ERROR, (errmsg("inserted nedo_cron.job_run_details row returned null run_id")));
+   }
 
    EndTransaction();
 
@@ -113,6 +100,11 @@ void UpdatePID(int64 runId, int pid) {
       );
    if (ret != SPI_OK_UPDATE) {
       ereport(ERROR, (errmsg("could not update pid in job_run_details row with runId=%ld", runId)));
+   }
+   if (SPI_processed == 0) {
+      elog(WARNING, "job_run_details row with runId=%ld disappeared before pid update", runId);
+      EndTransaction();
+      return;
    }
    if (SPI_processed != 1) { // в spi_processed лежит кол-во обработанных строк
       ereport(ERROR,
@@ -149,6 +141,11 @@ void UpdateRunDetailsFinish(int64 runId, const char *status, const char *message
       );
    if (ret != SPI_OK_UPDATE) {
       ereport(ERROR, (errmsg("could not update job_run_details row with runId=%ld", runId)));
+   }
+   if (SPI_processed == 0) {
+      elog(WARNING, "job_run_details row with runId=%ld disappeared before finish update", runId);
+      EndTransaction();
+      return;
    }
    if (SPI_processed != 1) { // в spi_processed лежит кол-во обработанных строк
       ereport(ERROR,

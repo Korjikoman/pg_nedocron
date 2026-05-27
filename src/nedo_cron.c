@@ -114,7 +114,7 @@ static void RegisterCronJobRelcacheCallbackIfNeeded(void) {
     }
 
     CronJobRelcacheOid = jobsRelid;
-    
+
     CacheRegisterRelcacheCallback(CronJobRelcacheCallback, ObjectIdGetDatum(CronJobRelcacheOid));
     elog(LOG, "my_nedo_cron: registered jobs relcache callback, relid=%u",
        CronJobRelcacheOid);
@@ -160,7 +160,7 @@ void _PG_init() {
         10000,
         0,
         INT_MAX,
-        PGC_POSTMASTER,
+        PGC_SIGHUP,
         0,
         NULL,
         NULL,
@@ -461,6 +461,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
     ConnStatusType conn_status = CONNECTION_BAD;
 
     PGresult * result = NULL;
+    bool stopReadingResults = false;
 
     if (job == NULL && taskState != CRON_TASK_DONE) {
         task->state = CRON_TASK_ERROR;
@@ -708,6 +709,8 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                 PQfreeCancel(cancel);
                 task->cancelRequested = true;
                 task->timedOut = true;
+                task->runDeadline = 0;
+                task->polling_status = PGRES_POLLING_READING;
 
             }
 
@@ -754,7 +757,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                             task->state = CRON_TASK_ERROR;
                         }
 
-
+                        stopReadingResults = true;
                         break;
                     }
                     case PGRES_COPY_BOTH:
@@ -763,6 +766,7 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
                         SetTaskError(task,"COPY not supported");
                         task->polling_status = 0;
                         task->state = CRON_TASK_ERROR;
+                        stopReadingResults = true;
                         break;
                     }
 
@@ -772,6 +776,9 @@ void ManageCronTask(CronTask *task, TimestampTz currentTime) {
 
                 }
                 PQclear(result);
+                if (stopReadingResults) {
+                    break;
+                }
 
             }
             PQfinish(connection);
@@ -993,5 +1000,4 @@ static bool ShouldRunTask(CronSchedule *schedule, TimestampTz currentTime, bool 
 
     return false;
 }
-
 

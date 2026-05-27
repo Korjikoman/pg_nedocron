@@ -265,13 +265,13 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
     char* username = GetUserNameFromId(userId, false);
     schedule = parse_with_error(scheduleChar, &parseError);
     char * databaseName = get_database_name(MyDatabaseId);
-
-    Oid cronSchemaId = InvalidOid;
-    Oid cronJobsRelationId = InvalidOid;
-
-    Datum jobIdSeqName = 0;
-    Datum jobIdDatum = 0;
+    int ret;
+    Oid argTypes[6] = {TEXTOID, TEXTOID, TEXTOID, INT4OID, TEXTOID, TEXTOID};
+    Datum argValues[6];
+    char nulls[6] = {' ', ' ', ' ', ' ', ' ', ' '};
+    bool isNull = false;
     int64 jobId = 0;
+
     if (schedule == NULL)
     {
         if (parseError.fieldIndex > 0 && parseError.token[0] != '\0')
@@ -289,41 +289,46 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
                  errmsg("invalid schedule: %s", parseError.message)));
     }
 
-    pfree(schedule);
+    free_cron_schedule(schedule);
 
-    jobIdSeqName = CStringGetTextDatum(JOB_ID_SEQUENCE_NAME);
-    jobIdDatum = DirectFunctionCall1(nextval, jobIdSeqName);
-    jobId = DatumGetInt64(jobIdDatum);
+    argValues[0] = CStringGetTextDatum(scheduleChar);
+    argValues[1] = CStringGetTextDatum(query);
+    argValues[2] = CStringGetTextDatum(nodename);
+    argValues[3] = Int32GetDatum(PostPortNumber);
+    argValues[4] = CStringGetTextDatum(databaseName);
+    argValues[5] = CStringGetTextDatum(username);
 
-    // создаем и заполняем массив values, который потом превратим в строку таблицы и insert'нем её
-    Datum values[Natts_cron_job];
-    bool isNulls[Natts_cron_job];
+    ret = SPI_connect();
+    if (ret != SPI_OK_CONNECT) {
+        ereport(ERROR, (errmsg("could not connect to SPI")));
+    }
 
-    memset(values, 0, sizeof(values));
-    memset(isNulls, false, sizeof(isNulls));
+    ret = SPI_execute_with_args(
+        "INSERT INTO nedo_cron.jobs(schedule, command, nodename, nodeport, database, username) "
+        "VALUES ($1, $2, $3, $4, $5, $6) "
+        "RETURNING jobid",
+        6,
+        argTypes,
+        argValues,
+        nulls,
+        false,
+        0);
 
-    values[Att_cron_job_jobid - 1] = jobIdDatum;
-    values[Att_cron_job_schedule - 1] = CStringGetTextDatum(scheduleChar);
-    values[Att_cron_job_command - 1] = CStringGetTextDatum(query);
-    values[Att_cron_job_nodename - 1] = CStringGetTextDatum(nodename);
-    values[Att_cron_job_nodeport - 1] = Int32GetDatum(PostPortNumber);
-    values[Att_cron_job_database - 1] = CStringGetTextDatum(databaseName);
-    values[Att_cron_job_username - 1] = CStringGetTextDatum(username);
+    if (ret != SPI_OK_INSERT_RETURNING || SPI_processed != 1) {
+        SPI_finish();
+        ereport(ERROR, (errmsg("could not insert row into nedo_cron.jobs")));
+    }
 
-    cronSchemaId = get_namespace_oid(CRON_SCHEMA_NAME, false);
-    cronJobsRelationId = get_relname_relid(JOBS_TABLE_NAME, cronSchemaId);
+    jobId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+                                        SPI_tuptable->tupdesc,
+                                        1,
+                                        &isNull));
+    if (isNull) {
+        SPI_finish();
+        ereport(ERROR, (errmsg("inserted nedo_cron.jobs row returned null jobid")));
+    }
 
-    Relation cronJobsTable = table_open(cronJobsRelationId, RowExclusiveLock);
-
-    TupleDesc tupleDescriptor = RelationGetDescr(cronJobsTable);
-    HeapTuple heap_tuple = heap_form_tuple(tupleDescriptor, values, isNulls); // строка таблицы
-
-    CatalogTupleInsert(cronJobsTable, heap_tuple);
-    CommandCounterIncrement();
-
-    table_close(cronJobsTable, RowExclusiveLock);
-
-    invalidate_job_cache_internal();
+    SPI_finish();
 
     PG_RETURN_INT64(jobId);
 }
@@ -331,41 +336,36 @@ Datum schedule_job(PG_FUNCTION_ARGS) {
 Datum unschedule_job(PG_FUNCTION_ARGS) {
 
     int64 jobId = PG_GETARG_INT64(0);
+    int ret;
+    Oid argTypes[1] = {INT8OID};
+    Datum argValues[1] = {Int64GetDatum(jobId)};
+    char nulls[1] = {' '};
 
-    Oid cronSchemaId = InvalidOid;
-    Oid cronJobRelationId = InvalidOid;
-    Oid cronJobIndexId = InvalidOid;
+    ret = SPI_connect();
+    if (ret != SPI_OK_CONNECT) {
+        ereport(ERROR, (errmsg("could not connect to SPI")));
+    }
 
-    Relation cronJobsTable = NULL;
-    SysScanDesc scan_desc = NULL;
-    ScanKeyData scankey[1];
-    int scanKeyCounter = 1;
-    bool indexOK = true;
-    HeapTuple heap_tuple = NULL;
+    ret = SPI_execute_with_args(
+        "DELETE FROM nedo_cron.jobs WHERE jobid = $1 RETURNING jobid",
+        1,
+        argTypes,
+        argValues,
+        nulls,
+        false,
+        0);
 
+    if (ret != SPI_OK_DELETE_RETURNING) {
+        SPI_finish();
+        ereport(ERROR, (errmsg("could not delete row from nedo_cron.jobs")));
+    }
 
-    cronSchemaId = get_namespace_oid(CRON_SCHEMA_NAME, false);
-    cronJobRelationId = get_relname_relid(JOBS_TABLE_NAME, cronSchemaId);
-    cronJobIndexId  = get_relname_relid(JOB_ID_INDEX_NAME, cronSchemaId);
-
-    cronJobsTable = table_open(cronJobRelationId, RowExclusiveLock);
-
-    ScanKeyInit(&scankey[0], Att_cron_job_jobid, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(jobId));
-
-    scan_desc = systable_beginscan(cronJobsTable, cronJobIndexId, indexOK, NULL, scanKeyCounter, scankey);
-
-    heap_tuple = systable_getnext(scan_desc);
-    if (!HeapTupleIsValid(heap_tuple)) {
+    if (SPI_processed != 1) {
+        SPI_finish();
         ereport(ERROR, (errmsg("Cannot find current job " UINT64_FORMAT, jobId)));
     }
 
-    simple_heap_delete(cronJobsTable, &heap_tuple->t_self);
-    CommandCounterIncrement();
-
-    systable_endscan(scan_desc);
-    table_close(cronJobsTable, RowExclusiveLock);
-
-    invalidate_job_cache_internal();
+    SPI_finish();
 
     PG_RETURN_BOOL(true);
 }
